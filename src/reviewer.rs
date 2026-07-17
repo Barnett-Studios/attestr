@@ -3,10 +3,11 @@
 //! pure layer — fully golden-tested. The dispatch (`claude -p`) is the only non-deterministic
 //! seam (Task 5.4).
 
-use dotclaude_support::model::{ReviewAction, ReviewParser};
+use baseplate::model::{ReviewAction, ReviewParser};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::path::Path;
 
 /// The broken-findings review request passed to the reviewer.
 pub struct ReviewRequest {
@@ -66,7 +67,7 @@ pub fn pick_reviewer_skill(files: &[String]) -> &'static str {
     }
     if files
         .iter()
-        .any(|f| dotclaude_support::java_test::is_java_test_file(f))
+        .any(|f| baseplate::java_test::is_java_test_file(f))
     {
         "test-code-reviewer"
     } else {
@@ -212,12 +213,14 @@ pub struct SkillBodies {
 }
 
 impl SkillBodies {
-    /// Load from framework paths (production). Missing `test-code-reviewer` → `qa = None`
-    /// (silent generic fallback). Missing generic → hard error.
-    pub fn load() -> Result<Self, String> {
-        let generic = std::fs::read_to_string(dotclaude_support::paths::review_skill_path())
+    /// Load the review-skill bodies from caller-supplied paths. The host owns
+    /// its file layout; this library stays agnostic to where the docs live.
+    /// Missing `test_code_reviewer` → `qa = None` (silent generic fallback);
+    /// missing `generic` → hard error.
+    pub fn load(generic_path: &Path, test_code_reviewer_path: &Path) -> Result<Self, String> {
+        let generic = std::fs::read_to_string(generic_path)
             .map_err(|e| format!("cannot load review skill: {e}"))?;
-        let qa = std::fs::read_to_string(dotclaude_support::paths::test_code_reviewer_path()).ok();
+        let qa = std::fs::read_to_string(test_code_reviewer_path).ok();
         Ok(Self { generic, qa })
     }
 }
@@ -239,14 +242,14 @@ impl<'a> Reviewer<'a> {
     /// Review broken findings. Empty findings → accept without dispatch. Else build
     /// prompt, dispatch (Err → accept/dispatch-error), extract text, parse, attach skill.
     /// Fail-open: every dispatch or parse failure yields a conservative accept.
-    pub async fn review(&self, req: &ReviewRequest) -> dotclaude_support::model::ReviewDecision {
+    pub async fn review(&self, req: &ReviewRequest) -> baseplate::model::ReviewDecision {
         let reviewer_skill = pick_reviewer_skill(&req.files).to_string();
         if req.findings.is_empty() {
-            return dotclaude_support::model::ReviewDecision {
-                action: dotclaude_support::model::ReviewAction::Accept,
+            return baseplate::model::ReviewDecision {
+                action: baseplate::model::ReviewAction::Accept,
                 feedback: None,
                 reasoning: Some("no findings to review".to_string()),
-                parser: dotclaude_support::model::ReviewParser::Ok,
+                parser: baseplate::model::ReviewParser::Ok,
                 reviewer_skill,
             };
         }
@@ -259,17 +262,17 @@ impl<'a> Reviewer<'a> {
         };
         let prompt = build_prompt(req, &self.skills.generic, qa);
         match self.dispatch.dispatch(&prompt).await {
-            Err(e) => dotclaude_support::model::ReviewDecision {
-                action: dotclaude_support::model::ReviewAction::Accept,
+            Err(e) => baseplate::model::ReviewDecision {
+                action: baseplate::model::ReviewAction::Accept,
                 feedback: None,
                 reasoning: Some(format!("reviewer-dispatch-error: {e}")),
-                parser: dotclaude_support::model::ReviewParser::DispatchError,
+                parser: baseplate::model::ReviewParser::DispatchError,
                 reviewer_skill,
             },
             Ok(raw) => {
                 let text = extract_text(&raw);
                 let core = parse_decision(&text);
-                dotclaude_support::model::ReviewDecision {
+                baseplate::model::ReviewDecision {
                     action: core.action,
                     feedback: core.feedback,
                     reasoning: core.reasoning,

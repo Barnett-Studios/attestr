@@ -32,19 +32,19 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs, prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
 
 `Finding` and `ReviewDecision` are the shared value types from
-[`dotclaude-support`](https://crates.io/crates/dotclaude-support) (`model`), so they cross the
-Verifier boundary as stable serialized types.
+[`baseplate`](https://crates.io/crates/baseplate) (`model`), so they cross the Verifier boundary
+as stable serialized types.
 
 ## Dependencies (publish order)
 
 attestr depends by version on [`cascadr`](https://crates.io/crates/cascadr) (the reviewer's
-dispatch provider) and [`dotclaude-support`](https://crates.io/crates/dotclaude-support) (shared
-types + registry). Both must be on crates.io **before** attestr publishes. The source workspace
+dispatch provider) and [`baseplate`](https://crates.io/crates/baseplate) (shared types +
+registry). Both must be on crates.io **before** attestr publishes. The source workspace
 redirects those version requirements to the local members via `[patch.crates-io]`; that patch is
 not part of this crate and does not travel to crates.io.
 
 ## What attestr does not do
 
-- It does not gate a commit or block a turn — that is the Policy Gate ([commitward](https://github.com/Barnett-Studios/commitward)).
-- It does not execute the agent loop or apply edits — that is the Executor.
-- It does not decide budget or admission — that is the Cost Governor.
+- It does not gate a commit or block a turn — that is a policy gate's job (e.g. [commitward](https://github.com/Barnett-Studios/commitward)).
+- It does not execute the agent loop or apply edits — that is the host loop runner's job.
+- It does not decide budget or admission — that is a cost/admission governor's job.

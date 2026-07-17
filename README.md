@@ -31,7 +31,7 @@ signal injected into the live loop** (injecting it measured harmful).
 
 ```toml
 [dependencies]
-attestr = "0.1"
+attestr = "0.2"
 ```
 
 ```rust
@@ -55,9 +55,9 @@ only on high-confidence broken findings).
 ## Publishing / building
 
 attestr depends on two sibling components — [`cascadr`](https://crates.io/crates/cascadr) and
-[`dotclaude-support`](https://crates.io/crates/dotclaude-support) — resolved by version. They
-must be published to crates.io **before** attestr (that is the family's publish order). In the
-source workspace they resolve to the local members via a `[patch.crates-io]` redirect.
+[`baseplate`](https://crates.io/crates/baseplate) — resolved by version. They must be published
+to crates.io **before** attestr (that is the family's publish order). In the source workspace
+they resolve to the local members via a `[patch.crates-io]` redirect.
 
 ## License
 

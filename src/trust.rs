@@ -1,7 +1,7 @@
 //! Trust: EMA math + tiers (this file's pure half) and the SQLite atomic store
 //! (`TrustStore`, added below).
 
-use dotclaude_support::model::VerificationResult;
+use baseplate::model::VerificationResult;
 
 pub const DEFAULT_DECAY: f64 = 0.85;
 pub const DEFAULT_TRUST: f64 = 0.5;
@@ -245,7 +245,7 @@ fn immediate_tx_retry<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotclaude_support::model::{Confidence, Observation, VerificationResult};
+    use baseplate::model::{Confidence, Observation, VerificationResult};
 
     fn r(result: Observation, confidence: Confidence) -> VerificationResult {
         VerificationResult {

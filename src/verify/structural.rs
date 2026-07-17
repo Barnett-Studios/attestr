@@ -1,12 +1,12 @@
 //! 7 cxpak-backed structural verifiers + concurrent orchestration.
 //! `None` response from any tool → `Observation::Skipped`, never an error (spec §5.6).
 
-use dotclaude_support::cxpak::{
+use baseplate::cxpak::{
     Architecture, CallGraph, CxpakClient, DeadCode, DeadSymbol, Health, Predict, SecuritySurface,
     Verify,
 };
-use dotclaude_support::model::{Confidence, Observation, VerificationResult};
-use dotclaude_support::trace::ts_now;
+use baseplate::model::{Confidence, Observation, VerificationResult};
+use baseplate::trace::ts_now;
 use serde_json::{json, Value};
 
 fn mk_result(
@@ -656,7 +656,7 @@ fn verify_change_impact(p: Option<Predict>) -> VerificationResult {
     let Some(p) = p else {
         return skipped(id, "cxpak_predict");
     };
-    // cxpak 3.0.0 (ADR-0174) dropped `risk_score` and returns per-file impact lists
+    // cxpak 3.0.0 dropped `risk_score` and returns per-file impact lists
     // plus `confidence_summary`. Detect that shape by `confidence_summary` (its
     // `risk_score` would otherwise default to 0.0 and silently pass every turn).
     // No risk threshold survives the restructuring, so report the real
@@ -827,8 +827,8 @@ fn verify_security_surface(
 #[cfg(test)]
 mod tests {
     use super::{relative_import_symbols, verify_all};
-    use dotclaude_support::cxpak::RecordedCxpakClient;
-    use dotclaude_support::model::{Confidence, Observation};
+    use baseplate::cxpak::RecordedCxpakClient;
+    use baseplate::model::{Confidence, Observation};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -1286,31 +1286,31 @@ mod tests {
         };
         assert_eq!(
             conf_of("import-validity"),
-            dotclaude_support::model::Confidence::High
+            baseplate::model::Confidence::High
         );
         assert_eq!(
             conf_of("function-length"),
-            dotclaude_support::model::Confidence::Medium
+            baseplate::model::Confidence::Medium
         );
         assert_eq!(
             conf_of("duplication"),
-            dotclaude_support::model::Confidence::Medium
+            baseplate::model::Confidence::Medium
         );
         assert_eq!(
             conf_of("architectural-boundary"),
-            dotclaude_support::model::Confidence::Medium
+            baseplate::model::Confidence::Medium
         );
         assert_eq!(
             conf_of("convention-compliance"),
-            dotclaude_support::model::Confidence::Medium
+            baseplate::model::Confidence::Medium
         );
         assert_eq!(
             conf_of("change-impact"),
-            dotclaude_support::model::Confidence::Medium
+            baseplate::model::Confidence::Medium
         );
         assert_eq!(
             conf_of("security-surface"),
-            dotclaude_support::model::Confidence::High
+            baseplate::model::Confidence::High
         );
     }
 }

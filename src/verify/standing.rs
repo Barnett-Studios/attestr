@@ -1,5 +1,5 @@
 use crate::verify::patterns::{compile_ci, compile_cs};
-use dotclaude_support::model::{Confidence, Method, MethodOutcome, Observation, PromiseSpec};
+use baseplate::model::{Confidence, Method, MethodOutcome, Observation, PromiseSpec};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
@@ -335,7 +335,7 @@ fn test_assertion_patterns(spec: &PromiseSpec, output: &str, ctx: &VerifyContext
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotclaude_support::model::{PromiseSpec, PromiseType};
+    use baseplate::model::{PromiseSpec, PromiseType};
 
     fn make_spec(method: Method) -> PromiseSpec {
         PromiseSpec {
@@ -360,7 +360,7 @@ mod tests {
         }
     }
 
-    use dotclaude_support::java_test::JAVA_TEST_FILE_PATTERN as JAVA_TFP;
+    use baseplate::java_test::JAVA_TEST_FILE_PATTERN as JAVA_TFP;
     const FORBIDDEN: &[&str] = &[r"\bJsonNode\b", r"\.getField\(", r"\.fields\(\)"];
 
     fn tap_spec(tfp: Option<&str>, forbidden: &[&str]) -> PromiseSpec {
@@ -464,46 +464,6 @@ mod tests {
         let spec = grep_spec(NO_PLACEHOLDERS_PATTERN);
         let got = grep(&spec, "this feature is not yet implemented");
         assert_eq!(got.result, Observation::Broken);
-    }
-
-    /// Load the REAL `promise/registry.yaml` and exercise its actual
-    /// `complete-output`/`no-placeholders` patterns end-to-end (not the local
-    /// duplicated consts above) — proves the shipped YAML, not just a copy of
-    /// it, is word-anchored.
-    #[test]
-    fn registry_yaml_complete_output_and_no_placeholders_are_word_anchored() {
-        let (registry_path, _) = dotclaude_support::registry::default_paths();
-        let registry = dotclaude_support::registry::load(&registry_path, None)
-            .expect("registry.yaml must load for this test");
-
-        let complete_output = registry
-            .promises
-            .get("complete-output")
-            .expect("complete-output must exist in registry.yaml");
-        let no_placeholders = registry
-            .promises
-            .get("no-placeholders")
-            .expect("no-placeholders must exist in registry.yaml");
-
-        let marker_broken = grep(complete_output, "// TODO: fix this later");
-        assert_eq!(marker_broken.result, Observation::Broken);
-        let identifier_kept = grep(complete_output, "struct TodoItem;");
-        assert_eq!(
-            identifier_kept.result,
-            Observation::Kept,
-            "registry.yaml complete-output pattern must not match TodoItem; evidence: {}",
-            identifier_kept.evidence
-        );
-
-        let stub_broken = grep(no_placeholders, "this is a stub impl for now");
-        assert_eq!(stub_broken.result, Observation::Broken);
-        let stub_dispatch_kept = grep(no_placeholders, "StubDispatch::new()");
-        assert_eq!(
-            stub_dispatch_kept.result,
-            Observation::Kept,
-            "registry.yaml no-placeholders pattern must not match StubDispatch; evidence: {}",
-            stub_dispatch_kept.evidence
-        );
     }
 
     #[test]

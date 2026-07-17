@@ -2,8 +2,8 @@
 //! `verify_exploration_breadth`, and `verify_context_acquisition`.
 //! Pure over the trace — no I/O, no async.
 
-use dotclaude_support::model::{Confidence, Observation, VerificationResult};
-use dotclaude_support::trace::ts_now;
+use baseplate::model::{Confidence, Observation, VerificationResult};
+use baseplate::trace::ts_now;
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -98,13 +98,19 @@ pub fn verify_behavioral(
     trace: &[Value],
     changed_files: &[String],
     blast_radius: Option<&Value>,
+    docs_currency: Option<&DocsCurrency>,
 ) -> Vec<VerificationResult> {
-    vec![
+    let mut out = vec![
         verify_read_before_write(trace, changed_files),
         verify_exploration_breadth(trace, blast_radius),
         verify_context_acquisition(trace),
-        verify_docs_currency(changed_files),
-    ]
+    ];
+    // The docs-currency check is host policy: it runs only when the host injects
+    // its surface/doc file map. No map → the check is absent (not a silent Kept).
+    if let Some(cfg) = docs_currency {
+        out.push(verify_docs_currency(changed_files, cfg));
+    }
+    out
 }
 
 /// Coverage check: every file in `changed_files` must appear in at least one
@@ -298,28 +304,21 @@ fn verify_context_acquisition(trace: &[Value]) -> VerificationResult {
     )
 }
 
-/// Path-prefix substrings identifying a "documented public surface" file: an
-/// `LLM_*` env-var definition site, the CLI dispatch, or the cockpit model
-/// list. Hardcoded Rust consts, not YAML-driven — matching the existing
-/// `verify_context_acquisition` precedent (its `cxpak_auto_context`/
-/// `cxpak_overview` patterns are hardcoded too; `context-acquisition`'s YAML
-/// `tool_pattern` field is dead data). Deliberately the same file sets the
-/// drift tests in `drift.rs` already treat as sources.
-const DOCS_CURRENCY_SURFACE_PATHS: &[&str] = &[
-    "skills/execute-node/",
-    "crates/dotclaude/src/main.rs",
-    "cockpit/goose/litellm-config.yaml",
-];
-
-/// Canonical doc paths — the same targets `drift.rs`'s new invariants check
-/// against. Matched by `path_matches` (exact file path, not substring), so the
-/// root `README.md` entry matches only the root README, never `docs/adrs/README.md`.
-const DOCS_CURRENCY_DOC_PATHS: &[&str] = &[
-    "README.md",
-    "docs/setup-macos.md",
-    "docs/architecture/routing-and-portability.md",
-    "cockpit/goose/README.md",
-];
+/// Injected policy for the `docs-currency` check. `surface_paths` are the
+/// changed-file paths that count as a "documented public surface" (a change
+/// there is expected to touch a doc); `doc_paths` are the canonical docs that
+/// satisfy that expectation. The library ships **no** defaults — a host supplies
+/// its own file map, encoding its own repository layout, or omits it (pass
+/// `None` to `verify_behavioral`) to skip the check entirely.
+///
+/// Matching (see `path_matches`): an entry ending in `/` is a directory prefix
+/// (matches any file under it); every other entry is a full repo-relative file
+/// path matched exactly — so a `README.md` entry matches only the root README,
+/// never `docs/adrs/README.md`.
+pub struct DocsCurrency {
+    pub surface_paths: Vec<String>,
+    pub doc_paths: Vec<String>,
+}
 
 /// Match a changed-file path against a surface/doc entry precisely. An entry
 /// ending in `/` is a directory prefix (matches files under it); every other
@@ -339,10 +338,10 @@ fn path_matches(f: &str, entry: &str) -> bool {
 /// touches a documented public surface, a canonical doc should have been
 /// touched too. Never blocks — `Broken` is Confidence::Low telemetry only,
 /// same tier as `read-before-write`/`exploration-breadth`/`context-acquisition`.
-/// An empty `changed_files` list fails open to `Kept` (ADR-0030 discipline,
-/// mirroring `verify_read_before_write`'s own empty-list branch) rather than
-/// treating "unknown" as evidence of a broken promise.
-fn verify_docs_currency(changed_files: &[String]) -> VerificationResult {
+/// An empty `changed_files` list fails open to `Kept` (mirroring
+/// `verify_read_before_write`'s own empty-list branch) rather than treating
+/// "unknown" as evidence of a broken promise.
+fn verify_docs_currency(changed_files: &[String], cfg: &DocsCurrency) -> VerificationResult {
     let id = "docs-currency";
 
     if changed_files.is_empty() {
@@ -351,11 +350,7 @@ fn verify_docs_currency(changed_files: &[String]) -> VerificationResult {
 
     let surface_touched: Vec<&String> = changed_files
         .iter()
-        .filter(|f| {
-            DOCS_CURRENCY_SURFACE_PATHS
-                .iter()
-                .any(|p| path_matches(f, p))
-        })
+        .filter(|f| cfg.surface_paths.iter().any(|p| path_matches(f, p)))
         .collect();
 
     if surface_touched.is_empty() {
@@ -369,7 +364,7 @@ fn verify_docs_currency(changed_files: &[String]) -> VerificationResult {
 
     let doc_touched = changed_files
         .iter()
-        .any(|f| DOCS_CURRENCY_DOC_PATHS.iter().any(|p| path_matches(f, p)));
+        .any(|f| cfg.doc_paths.iter().any(|p| path_matches(f, p)));
 
     if doc_touched {
         mk(
@@ -416,7 +411,7 @@ mod tests {
             json!({ "ev": "tool", "name": "Write", "file_path": "src/new.js", "args_summary": "Write src/new.js", "tokens": 80 }),
         ];
         let changed = vec!["src/new.js".to_string()];
-        let results = verify_behavioral(&trace, &changed, None);
+        let results = verify_behavioral(&trace, &changed, None, None);
         let rbw = results
             .iter()
             .find(|r| r.promise_id == "read-before-write")
@@ -448,7 +443,7 @@ mod tests {
         let trace = vec![
             json!({ "ev": "tool", "name": "cxpak_context", "args_summary": "op=context task=x" }),
         ];
-        let results = verify_behavioral(&trace, &[], None);
+        let results = verify_behavioral(&trace, &[], None, None);
         let ca = results
             .iter()
             .find(|r| r.promise_id == "context-acquisition")
@@ -461,7 +456,7 @@ mod tests {
         // 0 reads, 3 related files → ratio 0.0 < 0.5 → Broken.
         let trace: Vec<Value> = vec![];
         let blast = json!({ "direct_dependents": ["a.js", "b.js", "c.js"], "transitive_dependents": [], "test_files": [] });
-        let results = verify_behavioral(&trace, &[], Some(&blast));
+        let results = verify_behavioral(&trace, &[], Some(&blast), None);
         let eb = results
             .iter()
             .find(|r| r.promise_id == "exploration-breadth")
@@ -471,9 +466,19 @@ mod tests {
         assert_eq!(eb.evidence, "0/3 related files explored (0%)");
     }
 
+    /// A representative host file map: a CLI directory prefix and an entry-point
+    /// file are surfaces; only the root README is canonical.
+    fn docs_cfg() -> DocsCurrency {
+        DocsCurrency {
+            surface_paths: vec!["src/cli/".to_string(), "src/main.rs".to_string()],
+            doc_paths: vec!["README.md".to_string()],
+        }
+    }
+
     #[test]
     fn docs_currency_kept_when_no_files_changed() {
-        let results = verify_behavioral(&[], &[], None);
+        let cfg = docs_cfg();
+        let results = verify_behavioral(&[], &[], None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
@@ -483,12 +488,17 @@ mod tests {
     }
 
     #[test]
+    fn docs_currency_absent_when_no_config_injected() {
+        // No host file map → the check does not run at all (not a silent Kept).
+        let results = verify_behavioral(&[], &["src/main.rs".to_string()], None, None);
+        assert!(results.iter().all(|r| r.promise_id != "docs-currency"));
+    }
+
+    #[test]
     fn docs_currency_kept_when_surface_and_doc_both_touched() {
-        let changed = vec![
-            "crates/dotclaude/src/main.rs".to_string(),
-            "README.md".to_string(),
-        ];
-        let results = verify_behavioral(&[], &changed, None);
+        let cfg = docs_cfg();
+        let changed = vec!["src/main.rs".to_string(), "README.md".to_string()];
+        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
@@ -498,8 +508,9 @@ mod tests {
 
     #[test]
     fn docs_currency_broken_when_surface_touched_without_doc() {
-        let changed = vec!["skills/execute-node/run_nodes.py".to_string()];
-        let results = verify_behavioral(&[], &changed, None);
+        let cfg = docs_cfg();
+        let changed = vec!["src/cli/run.rs".to_string()];
+        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
@@ -513,11 +524,12 @@ mod tests {
         // A surface change plus an UNRELATED README (docs/adrs/README.md) must not
         // satisfy the promise — only the canonical root README.md counts. Guards the
         // substring→exact-path fix (contains("README.md") matched any README).
+        let cfg = docs_cfg();
         let changed = vec![
-            "skills/execute-node/run_nodes.py".to_string(),
+            "src/cli/run.rs".to_string(),
             "docs/adrs/README.md".to_string(),
         ];
-        let results = verify_behavioral(&[], &changed, None);
+        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
