@@ -1,0 +1,62 @@
+name: Bug report
+description: Something attestr did wrong — a crash, a wrong result, or unexpected behavior.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A minimal reproduction is the single most useful
+        thing you can provide — it turns hours of guessing into minutes of fixing.
+        For security vulnerabilities, do **not** file here — use a private
+        [security advisory](https://github.com/Barnett-Studios/attestr/security/advisories/new).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, what did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Ideally a link to a minimal repo or a snippet that triggers it. Include
+        the exact command and any relevant file(s).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: attestr version
+      description: The released version or the commit SHA you built from.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install attestr?
+      options:
+        - "Cargo dependency (crates.io)"
+        - Git dependency
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: "macOS 15 arm64 / Ubuntu 24.04 x86_64 / Windows 11 x86_64"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or backtrace
+      description: >
+        Paste any error output. For a Rust panic, re-run with RUST_BACKTRACE=1.
+        This is automatically formatted as code — no backticks needed.
+      render: shell
+    validations:
+      required: false
