@@ -17,7 +17,7 @@ assessments. The agent never sees its own assessment: this is **telemetry, not a
 signal injected into the live loop** (injecting it measured harmful).
 
 > Part of the Barnett Studios agentic-harness toolkit → cxpak · commitward · abproof · cascadr ·
-> cordon · planner · **attestr**
+> cordon · slicr · **attestr**
 
 ## The three parts
 
@@ -73,4 +73,4 @@ toolkit: [cxpak](https://github.com/Barnett-Studios/cxpak) ·
 [cascadr](https://github.com/Barnett-Studios/cascadr) ·
 [abproof](https://github.com/Barnett-Studios/abproof) ·
 [cordon](https://github.com/Barnett-Studios/cordon) ·
-[planner](https://github.com/Barnett-Studios/planner) · **attestr**.
+[slicr](https://github.com/Barnett-Studios/slicr) · **attestr**.
