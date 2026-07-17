@@ -1292,10 +1292,7 @@ mod tests {
             conf_of("function-length"),
             baseplate::model::Confidence::Medium
         );
-        assert_eq!(
-            conf_of("duplication"),
-            baseplate::model::Confidence::Medium
-        );
+        assert_eq!(conf_of("duplication"), baseplate::model::Confidence::Medium);
         assert_eq!(
             conf_of("architectural-boundary"),
             baseplate::model::Confidence::Medium
