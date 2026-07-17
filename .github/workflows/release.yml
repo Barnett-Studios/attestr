@@ -1,0 +1,35 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # release: publish to crates.io
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # prerelease: build/verify only, no publish
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    name: publish
+    # A library crate: crates.io is the only artifact — no binaries, image, or brew.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Actions pinned to commit SHAs (never @vN — tags are mutable).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: resolve toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = \"\(.*\)\"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-06-30
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      - name: verify build (always)
+        run: cargo publish --locked --dry-run
+      - name: publish to crates.io (final release tags only)
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
