@@ -14,6 +14,19 @@ categories = ["development-tools"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+# `cli` gates the `attestr verify` binary (ADR-0054). Off by default, so library
+# consumers (e.g. dotclaude-core) pull in no extra build; the release image builds
+# with `--features cli`. No extra dependencies — the CLI uses serde/serde_json only.
+cli = []
+
+# The self-contained behavioral verifier as a one-shot CLI. Only built under `--features cli`,
+# so a plain `cargo build`/library consume is unchanged.
+[[bin]]
+name = "attestr"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
 async-trait = "0.1"
 # Sibling components, resolved from crates.io by version (publish order:
