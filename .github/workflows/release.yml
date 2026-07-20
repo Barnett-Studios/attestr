@@ -170,12 +170,15 @@ jobs:
         # Idempotent: a re-run or re-tag of an already-published version is a
         # no-op success, not a hard failure — so brew/artifact fixes can re-release.
         run: |
-          if cargo publish --locked 2>publish.log; then
+          # Capture stderr OUTSIDE the crate dir — a log file inside it makes the tree
+          # dirty and `cargo publish`'s cleanliness check refuses before uploading.
+          log="${RUNNER_TEMP:-/tmp}/cw-publish.log"
+          if cargo publish --locked 2>"$log"; then
             echo "published"
-          elif grep -qiE "already (exists|uploaded)|is already uploaded" publish.log; then
-            echo "already on crates.io — skipping"; cat publish.log
+          elif grep -qiE "already (exists|uploaded)|is already uploaded" "$log"; then
+            echo "already on crates.io — skipping"; cat "$log"
           else
-            cat publish.log; exit 1
+            cat "$log"; exit 1
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -198,6 +201,12 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
+          # Optional: the Homebrew tap needs a push-scoped TAP_TOKEN secret. Skip (green) when it
+          # is absent so the crate + image release is never blocked on the tap.
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::TAP_TOKEN unset — skipping Homebrew formula update"
+            exit 0
+          fi
           VERSION="${GITHUB_REF_NAME#v}"
           SHA_LINUX_X86=$(sha256sum artifacts/attestr-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
           SHA_LINUX_ARM=$(sha256sum artifacts/attestr-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
