@@ -1,35 +1,252 @@
 name: Release
+
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'        # release: publish to crates.io
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # prerelease: build/verify only, no publish
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # release: full pipeline (binaries + image + crates.io + brew)
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # prerelease (e.g. -rc.1): binaries + image only
+
 permissions:
   contents: read
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  publish:
-    name: publish
-    # A library crate: crates.io is the only artifact — no binaries, image, or brew.
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  build:
+    strategy:
+      fail-fast: false   # one target failing shouldn't cancel/mask the others
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.os }}
     steps:
-      # Actions pinned to commit SHAs (never @vN — tags are mutable).
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
+      - uses: actions/checkout@v4
       - name: resolve toolchain
         id: rust
+        shell: bash   # windows-latest defaults to pwsh, where sed/$GITHUB_OUTPUT don't work
+        run: echo "channel=$(sed -n 's/^channel = \"\(.*\)\"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      # Pin to the rust-toolchain.toml channel AND add the cross target to THAT
+      # toolchain — @stable would add the target to stable while cargo (driven by
+      # rust-toolchain.toml) uses the pinned channel, leaving it without std for
+      # the target (error[E0463]: can't find crate for `std`).
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-06-30
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          targets: ${{ matrix.target }}
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # `--features cli` builds the `attestr` binary (off by default so library
+      # consumers pull in no extra build); it is what the image and brew ship.
+      - name: Build
+        run: cargo build --release --locked --features cli --target ${{ matrix.target }}
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../attestr-${{ matrix.target }}.tar.gz attestr
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/attestr.exe -DestinationPath attestr-${{ matrix.target }}.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: attestr-${{ matrix.target }}
+          path: attestr-${{ matrix.target }}.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: artifacts/*
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign keyless signing via GitHub OIDC
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute lowercase image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Stage per-arch binaries for Dockerfile.dist
+        run: |
+          mkdir -p dist/linux/amd64 dist/linux/arm64
+          tar -xzf artifacts/attestr-x86_64-unknown-linux-gnu.tar.gz -C dist/linux/amd64/
+          tar -xzf artifacts/attestr-aarch64-unknown-linux-gnu.tar.gz -C dist/linux/arm64/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata (tags + OCI labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      # COPY-only Dockerfile.dist needs no QEMU: buildx assembles the manifest
+      # from the prebuilt per-arch binaries.
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dist
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  publish:
+    needs: build
+    if: ${{ !contains(github.ref_name, '-') }}   # skip crates.io on prerelease tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolve toolchain
+        id: rust
+        shell: bash   # windows-latest defaults to pwsh, where sed/$GITHUB_OUTPUT don't work
         run: echo "channel=$(sed -n 's/^channel = \"\(.*\)\"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master @ 2026-06-30
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
-      - name: verify build (always)
-        run: cargo publish --dry-run
-      - name: publish to crates.io (final release tags only)
-        if: ${{ !contains(github.ref_name, '-') }}
-        run: cargo publish
+      - name: Publish to crates.io
+        # Idempotent: a re-run or re-tag of an already-published version is a
+        # no-op success, not a hard failure — so brew/artifact fixes can re-release.
+        run: |
+          if cargo publish --locked 2>publish.log; then
+            echo "published"
+          elif grep -qiE "already (exists|uploaded)|is already uploaded" publish.log; then
+            echo "already on crates.io — skipping"; cat publish.log
+          else
+            cat publish.log; exit 1
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  update-homebrew:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}   # skip Homebrew tap on prerelease tags
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release binaries
+        # Only the attestr-* binary artifacts are needed for the formula shas;
+        # pulling *all* artifacts also fetches the buildx provenance blobs, which
+        # have flaked the download in sibling repos ("failed after 5 retries").
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: attestr-*
+          merge-multiple: true
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_LINUX_X86=$(sha256sum artifacts/attestr-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM=$(sha256sum artifacts/attestr-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)
+          SHA_MAC_X86=$(sha256sum artifacts/attestr-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)
+          SHA_MAC_ARM=$(sha256sum artifacts/attestr-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/Barnett-Studios/homebrew-tap.git" tap
+          cd tap
+          mkdir -p Formula
+          cat > Formula/attestr.rb << 'RUBY'
+          class Attestr < Formula
+            desc "Promise-Theory behavioral verification for coding agents, as a one-shot CLI"
+            homepage "https://github.com/Barnett-Studios/attestr"
+          RUBY
+          cat >> Formula/attestr.rb << EOF
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/Barnett-Studios/attestr/releases/download/v${VERSION}/attestr-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_ARM}"
+              else
+                url "https://github.com/Barnett-Studios/attestr/releases/download/v${VERSION}/attestr-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MAC_X86}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/Barnett-Studios/attestr/releases/download/v${VERSION}/attestr-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              else
+                url "https://github.com/Barnett-Studios/attestr/releases/download/v${VERSION}/attestr-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_X86}"
+              end
+            end
+
+            def install
+              bin.install "attestr"
+            end
+
+            test do
+              system "#{bin}/attestr", "--help"
+            end
+          end
+          EOF
+
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Formula/attestr.rb
+          git diff --cached --quiet || git commit -m "Update attestr to ${VERSION}"
+          git push

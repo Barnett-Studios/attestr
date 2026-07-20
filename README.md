@@ -3,6 +3,7 @@
 [![CI](https://github.com/Barnett-Studios/attestr/actions/workflows/ci.yml/badge.svg)](https://github.com/Barnett-Studios/attestr/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/attestr)](https://crates.io/crates/attestr)
 [![docs.rs](https://img.shields.io/docsrs/attestr)](https://docs.rs/attestr)
+[![ghcr.io](https://img.shields.io/badge/ghcr.io-attestr-blue?logo=docker)](https://github.com/Barnett-Studios/attestr/pkgs/container/attestr)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 **Promise-Theory verification for an agentic coding loop — assess a turn's output against the
@@ -44,6 +45,34 @@ let findings = verify::structural::verify_all(&changed_files, &ctx).await?;
 let store = trust::TrustStore::open(&db_path)?;
 let tier = trust::trust_tier(store.get(agent_id)?.unwrap_or(0.5));
 ```
+
+## `attestr verify` — the behavioral pillar as a one-shot container
+
+Any harness — not just a Rust one — can run attestr's **behavioral** verifiers without linking
+the crate, via a self-contained CLI shipped as a container image. It reads a JSON request on
+stdin and writes an [ADR-0052](https://github.com/Barnett-Studios/attestr) response envelope on
+stdout. It touches no network and no filesystem, so it runs fully sandboxed:
+
+```console
+$ echo '{"trace":[],"changed_files":["src/foo.rs"]}' \
+    | docker run --rm -i --network none ghcr.io/barnett-studios/attestr verify
+{"schema_version":"1","status":"ok","body":{"findings":[{"promise_id":"read-before-write",...}]}}
+```
+
+The request is `{trace, changed_files, blast_radius?, docs_currency?}` (every field optional; the
+verifiers fail open on absent inputs). The envelope is `{schema_version, status, body}` — a
+consumer treats any `status != "ok"` as an infrastructure failure and falls back to its
+in-process path rather than trusting the result. Bad input is a hard error (`status: "error"`,
+non-zero exit), never a silent clean pass.
+
+**In scope for the container: the behavioral pillar only.** The *structural* pillar is
+cxpak-backed (needs a live client) and the *standing-promise* pillar needs the host's resolved
+registry — both stay in-process. A harness wanting the full three-pillar verify links the crate
+(above); this image gives any harness the behavioral pillar via one `docker run`.
+
+The same binary is on the [Homebrew tap](https://github.com/Barnett-Studios/homebrew-tap)
+(`brew install barnett-studios/tap/attestr`) and attached to each GitHub Release. Building it
+from source needs the `cli` feature: `cargo build --release --features cli`.
 
 ## Constitution
 
