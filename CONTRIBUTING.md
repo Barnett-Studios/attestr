@@ -66,6 +66,17 @@ attestr is defined by its [`CONTRACT.md`](CONTRACT.md): the interface, the invar
 guarantees other components rely on. A change that alters observable behavior updates the
 contract **in the same PR**. Swappability is the point — don't break the socket.
 
+## Review & merge protocol
+
+Every repository in the [Barnett Studios](https://github.com/Barnett-Studios) family lands changes
+under the same four rules — maintainers included:
+
+1. **Change via PR.** All changes land through a pull request against `main`; no direct pushes.
+2. **Green CI.** A PR merges only when every required CI check passes.
+3. **A review.** A PR merges only with at least one approving review.
+4. **Reviewer ≠ author.** The approving review must come from someone other than the PR's author —
+   no self-approval, no self-merge.
+
 ## Pull requests
 
 1. Branch off `main` (fetch first — `main` moves).
