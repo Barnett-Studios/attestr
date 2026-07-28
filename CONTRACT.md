@@ -16,7 +16,15 @@ Anything conforming to this contract can drop into the Verifier slot.
    (`verify::structural`, cxpak-backed) checks run first and are pure functions of their input.
    The `claude -p` reviewer is dispatched **only** on a finding that is broken *with high
    confidence* — never speculatively, never as a clean-prompt resample.
-4. **Trust is monotone in evidence, not caller-set.** Per-agent trust is an exponential moving
+4. **Reviewed content is data, never instruction.** The material the reviewer assesses is
+   produced by the agent whose trustworthiness is in question, so `build_prompt` frames it
+   between `reviewer::UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` and tells the reviewer that a
+   directive found inside the frame is evidence, not an order. The frame is structural, not
+   decorative: the framed region is a `serde_json` document, and JSON escapes control
+   characters inside string values, so no agent-authored text can begin a line — and
+   therefore none can forge a marker or close the fence. Replacing the serializer with raw
+   interpolation breaks that guarantee, and the tests say so.
+5. **Trust is monotone in evidence, not caller-set.** Per-agent trust is an exponential moving
    average (`trust::apply_ema`) over run observations. Callers read a tier (`trust::trust_tier`)
    and record observations; they do not hand-set trust except through the recorded path.
 
@@ -30,6 +38,7 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `trust::compute_run_observation`, `apply_ema`, `trust_tier`, `Tier` | the EMA machinery: run results → observation → updated trust → tier. |
 | `reviewer::Reviewer::with_skills(dispatch, skills).review(req) -> ReviewDecision` | async; dispatches an informed reviewer via a `cascadr` `Provider` and returns a structured `{action, feedback}`. |
 | `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs, prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
+| `reviewer::UNTRUSTED_OPEN`, `reviewer::UNTRUSTED_CLOSE` | the markers framing untrusted reviewed content in the prompt — `pub` so a consumer can assert on the framing rather than trust it. |
 
 `Finding` and `ReviewDecision` are the shared value types from
 [`baseplate`](https://crates.io/crates/baseplate) (`model`), so they cross the Verifier boundary
