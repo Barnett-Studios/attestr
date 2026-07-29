@@ -130,6 +130,13 @@ pub fn new_decision_tag() -> String {
 /// and the golden fixtures keep working. New callers should pair
 /// [`build_prompt_with_tag`] with [`parse_decision_with_tag`] — the tag is what closes
 /// the planted-verdict path in both directions.
+///
+/// **What you get without the tag.** This path still takes the *last* decision block, so
+/// the echo-before-verdict attack is closed: a planted object quoted ahead of the
+/// reviewer's answer no longer wins. What is *not* closed is the mirror image — a planted
+/// object quoted *after* the verdict. `Reviewer::review` uses the tagged pair, so attestr's
+/// own dispatch is covered; a consumer driving its own prompt/parse loop and ignoring the
+/// tag is on the weaker footing, and this is the line that says so.
 pub fn parse_decision(text: &str) -> DecisionCore {
     parse_decision_with_tag(text, "")
 }

@@ -56,7 +56,7 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `reviewer::Reviewer::with_skills(dispatch, skills).review(req) -> ReviewDecision` | async; dispatches an informed reviewer via a `cascadr` `Provider` and returns a structured `{action, feedback}`. |
 | `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs, prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
 | `reviewer::UNTRUSTED_OPEN`, `reviewer::UNTRUSTED_CLOSE` | the markers framing untrusted reviewed content in the prompt — `pub` so a consumer can assert on the framing rather than trust it. |
-| `reviewer::new_decision_tag`, `build_prompt_with_tag`, `parse_decision_with_tag` | the per-dispatch decision tag: one mechanism in two halves, additive to the untagged pair above. A consumer driving its own prompt/parse loop should use these; asking for a tag it does not parse (or parsing one it never asked for) is inert. |
+| `reviewer::new_decision_tag`, `build_prompt_with_tag`, `parse_decision_with_tag` | the per-dispatch decision tag: one mechanism in two halves, additive to the untagged pair above. A consumer driving its own prompt/parse loop should use these; asking for a tag it does not parse (or parsing one it never asked for) is inert. Ignoring the tag entirely leaves you on the last-block fallback — the echo-*before*-verdict attack is still closed, the mirror image after it is not. `Reviewer::review` uses the tagged pair. |
 
 `Finding` and `ReviewDecision` are the shared value types from
 [`baseplate`](https://crates.io/crates/baseplate) (`model`), so they cross the Verifier boundary
