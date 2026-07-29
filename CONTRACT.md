@@ -25,12 +25,22 @@ Anything conforming to this contract can drop into the Verifier slot.
    therefore none can forge a marker or close the fence. Replacing the serializer with raw
    interpolation breaks that guarantee, and the tests say so.
 
-   **This is a mitigation at the prompt layer, not a closed class.** It governs how the
-   reviewer is *told* to read the payload; it does not govern how the reviewer's *reply* is
-   parsed. `parse_decision` takes the **first** decision block it finds, and models routinely
-   quote their input — so a decision object planted in `agent_output` and echoed back ahead of
-   the real verdict is still read as the verdict, with no LLM cooperation required (attestr#10).
-   Until that is closed, treat reviewed content as framed, not as neutralised.
+   **The reply is parsed under the same assumption.** Framing governs how the reviewer is
+   *told* to read the payload. It says nothing about how the reviewer's reply is read, and
+   that was the load-bearing half: `parse_decision` took the **first** decision block, models
+   routinely quote their input, and the agent under review writes that input — so a planted
+   decision object, echoed back by a reviewer doing its job perfectly, outranked the real
+   verdict with no LLM cooperation at all (attestr#10).
+
+   The reviewer now marks its verdict with a per-dispatch tag (`reviewer::new_decision_tag`,
+   asked for by `build_prompt_with_tag`, required by `parse_decision_with_tag`). The payload
+   was authored before that value existed, so nothing inside it can wear the tag, whichever
+   side of the verdict it is quoted on. Untagged replies fall back to the **last** decision
+   block — the prompt ends "emit your decision now", so the verdict is contractually last.
+
+   Unchanged by this: the fail-open posture. No valid candidate still yields `accept` with
+   `ReviewParser::Failed`. What changed is *which* block is believed, not what happens when
+   none is.
 5. **Trust is monotone in evidence, not caller-set.** Per-agent trust is an exponential moving
    average (`trust::apply_ema`) over run observations. Callers read a tier (`trust::trust_tier`)
    and record observations; they do not hand-set trust except through the recorded path.
@@ -46,6 +56,7 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `reviewer::Reviewer::with_skills(dispatch, skills).review(req) -> ReviewDecision` | async; dispatches an informed reviewer via a `cascadr` `Provider` and returns a structured `{action, feedback}`. |
 | `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs, prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
 | `reviewer::UNTRUSTED_OPEN`, `reviewer::UNTRUSTED_CLOSE` | the markers framing untrusted reviewed content in the prompt — `pub` so a consumer can assert on the framing rather than trust it. |
+| `reviewer::new_decision_tag`, `build_prompt_with_tag`, `parse_decision_with_tag` | the per-dispatch decision tag: one mechanism in two halves, additive to the untagged pair above. A consumer driving its own prompt/parse loop should use these; asking for a tag it does not parse (or parsing one it never asked for) is inert. |
 
 `Finding` and `ReviewDecision` are the shared value types from
 [`baseplate`](https://crates.io/crates/baseplate) (`model`), so they cross the Verifier boundary
