@@ -16,7 +16,7 @@ Anything conforming to this contract can drop into the Verifier slot.
    (`verify::structural`, cxpak-backed) checks run first and are pure functions of their input.
    The `claude -p` reviewer is dispatched **only** on a finding that is broken *with high
    confidence* — never speculatively, never as a clean-prompt resample.
-4. **Reviewed content is data, never instruction.** The material the reviewer assesses is
+4. **Reviewed content is framed as data.** The material the reviewer assesses is
    produced by the agent whose trustworthiness is in question, so `build_prompt` frames it
    between `reviewer::UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` and tells the reviewer that a
    directive found inside the frame is evidence, not an order. The frame is structural, not
@@ -24,6 +24,13 @@ Anything conforming to this contract can drop into the Verifier slot.
    characters inside string values, so no agent-authored text can begin a line — and
    therefore none can forge a marker or close the fence. Replacing the serializer with raw
    interpolation breaks that guarantee, and the tests say so.
+
+   **This is a mitigation at the prompt layer, not a closed class.** It governs how the
+   reviewer is *told* to read the payload; it does not govern how the reviewer's *reply* is
+   parsed. `parse_decision` takes the **first** decision block it finds, and models routinely
+   quote their input — so a decision object planted in `agent_output` and echoed back ahead of
+   the real verdict is still read as the verdict, with no LLM cooperation required (attestr#10).
+   Until that is closed, treat reviewed content as framed, not as neutralised.
 5. **Trust is monotone in evidence, not caller-set.** Per-agent trust is an exponential moving
    average (`trust::apply_ema`) over run observations. Callers read a tier (`trust::trust_tier`)
    and record observations; they do not hand-set trust except through the recorded path.
