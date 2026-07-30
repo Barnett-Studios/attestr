@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "attestr"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "baseplate",
@@ -109,9 +109,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cascadr"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10db8e5dc2138ad4313287651c6731595f1274e859606e49eabc0786c86083f1"
+checksum = "67643f35da3a1bb24739ceea196219bdfc97e34f26fb92e94eb3a04bdf7e9dce"
 dependencies = [
  "async-trait",
  "libc",
