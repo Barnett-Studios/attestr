@@ -70,6 +70,22 @@ registry). Both must be on crates.io **before** attestr publishes. The source wo
 redirects those version requirements to the local members via `[patch.crates-io]`; that patch is
 not part of this crate and does not travel to crates.io.
 
+**The cascadr re-export is part of this contract, so the pin is too.** `reviewer.rs` re-exports
+`ClaudeCliDispatch`, `OpenAiCompat`, `Provider`, `ProviderError`, `Router` and `filter_child_env`
+under `attestr::reviewer::*`, which means a consumer constructing a dispatch through attestr
+receives whatever cascadr version *this* pin resolves — attestr's `Cargo.toml` decides it, not the
+consumer's.
+
+That is not a detail. Holding `cascadr = "0.1"` while cascadr shipped 0.2.0 handed downstreams the
+three-field `ClaudeCliDispatch` that always passes `--dangerously-skip-permissions`, silently, while
+attestr's own release notes described a security fix (attestr#13). A `"0.1"` and a `"0.2"` requirement
+are semver-incompatible, so cargo links **both** into one graph and the two `ClaudeCliDispatch` types
+stop being the same type — no compile error, just a consumer wired to the old one.
+
+So: a cascadr version bump that changes a re-exported type is a **breaking change to attestr**, takes
+attestr's own minor slot under 0.x, and lands in lockstep rather than whenever. `cargo tree -d` showing
+a duplicated cascadr is the mechanical symptom to watch for.
+
 ## What attestr does not do
 
 - It does not gate a commit or block a turn — that is a policy gate's job (e.g. [commitward](https://github.com/Barnett-Studios/commitward)).
