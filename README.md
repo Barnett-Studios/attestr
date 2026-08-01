@@ -15,7 +15,10 @@ turn's actual output *independently and after the fact* — grep-and-structural 
 then, when a finding is broken with high confidence, a `claude -p` reviewer that returns a
 structured `{action, feedback}` decision. Per-agent trust evolves as an EMA over these
 assessments. The agent never sees its own assessment: this is **telemetry, not a control
-signal injected into the live loop** (injecting it measured harmful).
+signal injected into the live loop**. Feeding an assessment back mid-turn is held to degrade
+outcomes — a **design position, not a measured result**: coupling per-turn telemetry to control
+flow coincides the measurement channel with the thing being measured, and makes the observer's
+own errors load-bearing.
 
 > Part of the Barnett Studios agentic-harness toolkit → cxpak · commitward · abproof · cascadr ·
 > cordon · slicr · **attestr**
@@ -26,7 +29,7 @@ signal injected into the live loop** (injecting it measured harmful).
 |---|---|
 | `verify` | Assess a turn's diff against declared promises. `structural` (cxpak-backed) and `standing` (registry-driven grep) checks produce findings; `behavioral` covers per-turn promise blocks. |
 | `trust` | The per-agent trust store (SQLite): each assessment nudges an exponential moving average; callers read a trust tier, they don't write it. |
-| `reviewer` | On a high-confidence broken finding, dispatch an informed reviewer via a [`cascadr`](https://crates.io/crates/cascadr) provider and return a structured `{action, feedback}` decision — never a clean-prompt resample (that measured as a regression). |
+| `reviewer` | On a high-confidence broken finding, dispatch an informed reviewer via a [`cascadr`](https://crates.io/crates/cascadr) provider and return a structured `{action, feedback}` decision rather than a clean-prompt resample. Handing the next attempt a specific signal is a different mechanism from resampling the same prompt — a **design hypothesis**; its advantage over resampling is **unmeasured**. |
 
 ## Use
 
