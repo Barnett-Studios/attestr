@@ -6,6 +6,9 @@
 [![ghcr.io](https://img.shields.io/badge/ghcr.io-attestr-blue?logo=docker)](https://github.com/Barnett-Studios/attestr/pkgs/container/attestr)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
+**Integrity plane · Active** — under development; the surface still moves.
+See the [component map](https://github.com/Barnett-Studios) for how this fits the rest.
+
 **Promise-Theory verification for an agentic coding loop — assess a turn's output against the
 promises its agent declared, emit findings and a per-agent trust delta, and (only on a
 high-confidence broken finding) dispatch an informed reviewer.**
