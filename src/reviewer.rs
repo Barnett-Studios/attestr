@@ -3,7 +3,6 @@
 //! pure layer — fully golden-tested. The dispatch (`claude -p`) is the only non-deterministic
 //! seam (Task 5.4).
 
-use baseplate::model::{ReviewAction, ReviewParser};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -325,6 +324,22 @@ pub fn parse_decision_with_tag(text: &str, tag: &str) -> DecisionCore {
 // (Phase 2: multi-provider routing). Re-exported here so existing
 // `reviewer::{Provider, ClaudeCliDispatch, ...}` import paths keep working.
 pub use cascadr::{ClaudeCliDispatch, OpenAiCompat, Provider, ProviderError, Router};
+
+// ---- Decision type re-exports ----
+//
+// `parse_decision` is public and returns a `DecisionCore` whose `action` and `parser` are
+// these types, so a consumer could not read its own result without adding baseplate by hand
+// (attestr#22). rustc's own suggestion for the resulting E0603 was `attestr::reviewer::
+// baseplate::model::ReviewAction`, which is not a path and does not compile — these make the
+// path it should have suggested real.
+//
+// Ergonomic aliases only: `attestr::model` re-exports the whole module and is what makes the
+// surface complete. These exist because this is where a reviewer consumer is already
+// importing from.
+// `pub use`, so the private import this module needs and the public path a consumer needs
+// are ONE declaration. Two — a private `use` plus a `pub use` — is how the public list comes
+// to be a subset of what the module actually uses.
+pub use baseplate::model::{ReviewAction, ReviewDecision, ReviewParser};
 
 /// Test double: returns a fixed `Ok` or `Err(Unavailable)` regardless of the prompt.
 pub struct StubDispatch(Result<String, String>);
