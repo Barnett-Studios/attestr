@@ -58,15 +58,38 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `reviewer::UNTRUSTED_OPEN`, `reviewer::UNTRUSTED_CLOSE` | the markers framing untrusted reviewed content in the prompt — `pub` so a consumer can assert on the framing rather than trust it. |
 | `reviewer::new_decision_tag`, `build_prompt_with_tag`, `parse_decision_with_tag` | the per-dispatch decision tag: one mechanism in two halves, additive to the untagged pair above. A consumer driving its own prompt/parse loop should use these; asking for a tag it does not parse (or parsing one it never asked for) is inert. Ignoring the tag entirely leaves you on the last-block fallback — the echo-*before*-verdict attack is still closed, the mirror image after it is not. `Reviewer::review` uses the tagged pair. |
 
-`Finding` and `ReviewDecision` are the shared value types from
-[`baseplate`](https://crates.io/crates/baseplate) (`model`), so they cross the Verifier boundary
-as stable serialized types.
+| `model` (`attestr::model`) | the whole of `baseplate::model`, re-exported — the value types every signature above is written in. |
+| `reviewer::{ReviewAction, ReviewDecision, ReviewParser}` · `verify::{Confidence, Method, MethodOutcome, Observation, PromiseSpec, VerificationResult}` | the same types, aliased next to the functions that use them. Convenience; `attestr::model` is what makes the surface complete. |
+
+The value types above come from [`baseplate`](https://crates.io/crates/baseplate) (`model`), so
+they cross the Verifier boundary as stable serialized types.
+
+**A consumer never needs to depend on baseplate to use this crate.** That was not true until
+attestr#22: `parse_decision` was public, listed in this table, and returned a `DecisionCore`
+whose `action` and `parser` a consumer could not name — the only fix was `cargo add baseplate`
+and choosing a version by hand, which is precisely the two-graph hazard the cascadr paragraph
+below documents as having already happened once.
+
+The re-export is of the **module**, deliberately, not a list of names. A list is a second
+enumeration of baseplate's model kept in step by hand, and it fails invisibly: `PromiseSpec`
+is exported, a consumer matches on `spec.promise_type`, and `PromiseType` — a field type
+nobody listed — is still unreachable. `tests/consumer_surface.rs` is written entirely in
+`attestr::` paths and does not compile if any of this stops being true.
 
 ## Dependencies (publish order)
 
 attestr depends by version on [`cascadr`](https://crates.io/crates/cascadr) (the reviewer's
 dispatch provider) and [`baseplate`](https://crates.io/crates/baseplate) (shared types +
-registry). Both must be on crates.io **before** attestr publishes. The source workspace
+registry). Both must be on crates.io **before** attestr publishes.
+
+**Both pins are part of this contract, for the same reason** — attestr re-exports types from
+each, so a consumer receives whatever version *this* crate's `Cargo.toml` resolves. The cascadr
+case is written out below because it is the one that broke; the baseplate case is identical in
+structure and currently latent: only 0.2.0 and 0.2.1 are published and attestr requires
+`"0.2"`, so a consumer's own `cargo add baseplate` lands inside attestr's range. It goes live
+the day baseplate 0.3.0 ships. A baseplate bump that changes a re-exported type is a breaking
+change to attestr, takes attestr's own minor slot under 0.x, and `cargo tree -d` showing a
+duplicated baseplate is the mechanical symptom. The source workspace
 redirects those version requirements to the local members via `[patch.crates-io]`; that patch is
 not part of this crate and does not travel to crates.io.
 
