@@ -12,6 +12,14 @@ Anything conforming to this contract can drop into the Verifier slot.
 2. **Fail-open.** A verifier that cannot run (cxpak absent, registry unreadable, db locked)
    yields *no finding* and a *no-op trust delta* — never a fabricated finding or a false block.
    The absence of attestr degrades observability, never correctness.
+
+   **Fail-open is not fail-silent, and a no-op delta is the whole of it.** "Cannot run" covers
+   a verifier that ran and had nothing to examine as much as one whose backend was absent: an
+   empty `changed_files`, or a diff carrying no import the parser recognises. Those report
+   `Skipped` — evidence saying which of the two it was — never `Kept`. A `Kept` is a *pass*,
+   and `update_trust` moves the score up on one; issuing it for a check that could not have
+   found anything is a fabricated finding in the direction nobody audits. Structural results
+   are only ever `Kept`/`Broken` where the check could have gone either way.
 3. **Deterministic-first, reviewer-gated.** Grep (`verify::standing`) and structural
    (`verify::structural`, cxpak-backed) checks run first and are pure functions of their input.
    The `claude -p` reviewer is dispatched **only** on a finding that is broken *with high

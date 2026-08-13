@@ -77,60 +77,35 @@ pub async fn verify_all(
     changed_files: &[String],
     diff: Option<&str>,
 ) -> Vec<VerificationResult> {
-    // No files changed: all 7 verifiers short-circuit to Kept without calling cxpak.
-    // This fires when `git diff --name-only HEAD` is empty.
+    // No files changed: every verifier short-circuits WITHOUT calling cxpak. That much is
+    // right — there is nothing to ask about. What was wrong is the answer it gave: seven
+    // `Kept`, two of them at `Confidence::High`, evidence "no files to check". A Kept feeds
+    // the trust EMA upward and reads downstream as "verified clean", so any upstream failure
+    // to populate `changed_files` — a diff-parse miss, an unusual diff, a caller that simply
+    // forgot — was laundered into a high-confidence pass for work nothing had looked at.
+    // `Skipped` is the honest observation: no signal, and `update_trust` leaves the score
+    // untouched (#6).
     if changed_files.is_empty() {
-        return vec![
+        return [
+            ("import-validity", "cxpak_call_graph"),
+            ("function-length", "cxpak_health"),
+            ("duplication", "cxpak_dead_code"),
+            ("architectural-boundary", "cxpak_architecture"),
+            ("convention-compliance", "cxpak_verify"),
+            ("change-impact", "cxpak_predict"),
+            ("security-surface", "cxpak_security_surface"),
+        ]
+        .into_iter()
+        .map(|(id, method)| {
             mk_result(
-                "import-validity",
-                "cxpak_call_graph",
-                Observation::Kept,
-                Confidence::High,
+                id,
+                method,
+                Observation::Skipped,
+                Confidence::Low,
                 "no files to check",
-            ),
-            mk_result(
-                "function-length",
-                "cxpak_health",
-                Observation::Kept,
-                Confidence::Medium,
-                "no files to check",
-            ),
-            mk_result(
-                "duplication",
-                "cxpak_dead_code",
-                Observation::Kept,
-                Confidence::Medium,
-                "no files to check",
-            ),
-            mk_result(
-                "architectural-boundary",
-                "cxpak_architecture",
-                Observation::Kept,
-                Confidence::Medium,
-                "no files to check",
-            ),
-            mk_result(
-                "convention-compliance",
-                "cxpak_verify",
-                Observation::Kept,
-                Confidence::Medium,
-                "no files to check",
-            ),
-            mk_result(
-                "change-impact",
-                "cxpak_predict",
-                Observation::Kept,
-                Confidence::Medium,
-                "no files to check",
-            ),
-            mk_result(
-                "security-surface",
-                "cxpak_security_surface",
-                Observation::Kept,
-                Confidence::High,
-                "no files to check",
-            ),
-        ];
+            )
+        })
+        .collect();
     }
 
     let predict_args = json!({ "files": changed_files });
@@ -302,6 +277,32 @@ fn verify_import_validity(
         return skipped(id, "cxpak_call_graph");
     };
     let local_imports = relative_import_symbols(diff);
+    // Nothing to match against: no diff was supplied, or its added lines carried no
+    // relative import the parser recognises — the parser handles Python `from .` and JS/TS
+    // `from './'` only, so a Rust/Go/Java/C++/Ruby change lands here too. The filter below
+    // then rejects EVERY unresolved edge, and the verifier is structurally incapable of
+    // returning Broken. It reported `Kept, High, "0 unresolved imports"` — a
+    // high-confidence pass for a language it never parsed.
+    //
+    // The condition is "this check cannot fire", not "the language is unsupported": a
+    // language list would drift away from what the parser actually handles, while this one
+    // is derived from what the code below can possibly conclude.
+    //
+    // The evidence names the edge count on purpose — it is what distinguishes this skip
+    // (cxpak answered, there was nothing to check) from `skipped()` (cxpak said nothing at
+    // all), and the alias time-bomb guard reads it to tell them apart (#6).
+    if local_imports.is_empty() {
+        return mk_result(
+            id,
+            "cxpak_call_graph",
+            Observation::Skipped,
+            Confidence::Low,
+            format!(
+                "cxpak_call_graph: {} edges, no relative import added by this diff to check",
+                cg.edges.len()
+            ),
+        );
+    }
     let all_unresolved = &cg.unresolved;
     let file_imports: Vec<&Value> = all_unresolved
         .iter()
@@ -659,15 +660,22 @@ fn verify_change_impact(p: Option<Predict>) -> VerificationResult {
     // cxpak 3.0.0 dropped `risk_score` and returns per-file impact lists
     // plus `confidence_summary`. Detect that shape by `confidence_summary` (its
     // `risk_score` would otherwise default to 0.0 and silently pass every turn).
-    // No risk threshold survives the restructuring, so report the real
-    // affected-file count and fail open to Kept at Low confidence — informational
-    // under 3.0.0, not a gating signal. The 2.3.0 `risk_score` path below is
-    // unchanged.
+    // No risk threshold survives the restructuring, so there is nothing to compare the
+    // impact against and this arm cannot return Broken at all — it reports the real
+    // affected-file count and nothing more.
+    //
+    // It said so at `Confidence::Low` and called that informational, which is right about
+    // the commit gate and wrong about the EMA: `Kept` is a *pass*, and `update_trust`
+    // raises the score on one however lightly it is weighted. Since cxpak 3.x is the
+    // pinned surface, every turn was paying that verifier a small credit for a judgement it
+    // no longer makes. `Skipped` says the same thing without the credit (#6, same class as
+    // the empty-`changed_files` short-circuit). The 2.3.0 `risk_score` path below is
+    // unchanged and still gates.
     if p.confidence_summary.is_some() {
         return mk_result(
             id,
             "cxpak_predict",
-            Observation::Kept,
+            Observation::Skipped,
             Confidence::Low,
             format!(
                 "cxpak predict (3.0.0): {} impacted file(s) across structural/call/historical/test impact",
@@ -896,10 +904,15 @@ mod tests {
     /// (`cxpak_graph`, with no legacy `cxpak_call_graph` recording) and assert
     /// import-validity still resolves via the fallback's intent-tool arm rather than
     /// silently degrading every structural verifier to Skipped.
+    ///
+    /// The diff carries a relative import so the verifier actually runs (#6): without one
+    /// the answer is Skipped for a reason that has nothing to do with the alias, and this
+    /// guard would fire on the wrong cause forever after.
     #[tokio::test]
     async fn structural_resolves_via_intent_tool_when_legacy_alias_absent() {
         let client = one_tool("cxpak_graph", json!({"edges": [{}], "unresolved": []}));
-        let results = verify_all(&client, &["src/foo.js".into()], None).await;
+        let diff = "+from .helpers import helper\n";
+        let results = verify_all(&client, &["src/foo.js".into()], Some(diff)).await;
         let r = results
             .iter()
             .find(|r| r.promise_id == "import-validity")
@@ -915,7 +928,9 @@ mod tests {
 
     /// change-impact under the cxpak 3.0.0 predict shape (no risk_score, per-file
     /// impact lists + confidence_summary). Must report the real impacted-file count
-    /// rather than silently passing on a defaulted risk_score=0.0.
+    /// rather than silently passing on a defaulted risk_score=0.0 — and must report it as
+    /// Skipped, because with no threshold left this arm cannot return Broken, so a Kept
+    /// would be trust credit for a judgement it no longer makes (#6).
     #[tokio::test]
     async fn change_impact_handles_cxpak_3_0_predict_shape() {
         let client = one_tool(
@@ -934,7 +949,7 @@ mod tests {
             .iter()
             .find(|r| r.promise_id == "change-impact")
             .unwrap();
-        assert_eq!(r.result, Observation::Kept);
+        assert_eq!(r.result, Observation::Skipped);
         assert_eq!(r.confidence, Confidence::Low);
         assert!(
             r.evidence.contains("2 impacted file(s)"),
@@ -1003,7 +1018,9 @@ mod tests {
             json!({"edges": [], "unresolved": [
                 {"callee_name": "system", "caller_file": "main.py", "caller_symbol": "run"}]}),
         );
-        let diff = "+import os\n+def run(cmd):\n+    os.system(cmd)\n";
+        // A relative import so the verifier runs at all (#6) — without one it now
+        // Skips, and the filter this test exists for would never be reached.
+        let diff = "+from .util import helper\n+import os\n+def run(cmd):\n+    os.system(cmd)\n";
         let results = verify_all(&client, &["main.py".into()], Some(diff)).await;
         let r = results
             .iter()
@@ -1017,9 +1034,12 @@ mod tests {
         );
     }
 
-    /// import-validity: no diff → cannot confirm a relative import → Kept (safe).
+    /// import-validity: no diff → nothing to match unresolved edges against → Skipped.
+    /// It must not block (the original point of this test), and it must not pass either:
+    /// with no diff the filter rejects every edge, so `Kept, High, "0 unresolved imports"`
+    /// was a high-confidence verdict from a check that could not have found anything (#6).
     #[tokio::test]
-    async fn import_validity_kept_when_diff_absent() {
+    async fn import_validity_skipped_when_diff_absent() {
         let client = one_tool(
             "cxpak_graph",
             json!({"edges": [], "unresolved": [
@@ -1030,7 +1050,38 @@ mod tests {
             .iter()
             .find(|r| r.promise_id == "import-validity")
             .unwrap();
-        assert_eq!(r.result, Observation::Kept, "evidence: {}", r.evidence);
+        assert_eq!(r.result, Observation::Skipped, "evidence: {}", r.evidence);
+        assert_eq!(r.confidence, Confidence::Low);
+        assert!(
+            r.evidence.contains("no relative import"),
+            "the skip must say why it skipped, not just that it did: {}",
+            r.evidence
+        );
+    }
+
+    /// The control for the two skips above: given a diff that DOES add a relative import,
+    /// import-validity still reaches a real verdict. Without this, a verifier hard-wired to
+    /// Skipped would satisfy every honesty assertion in this file.
+    #[tokio::test]
+    async fn import_validity_still_reaches_a_verdict_when_the_diff_has_relative_imports() {
+        let client = one_tool(
+            "cxpak_graph",
+            json!({"edges": [], "unresolved": [
+                {"callee_name": "missing_fn", "caller_file": "main.py", "caller_symbol": "a"}]}),
+        );
+        let diff = "+from .helpers import missing_fn\n";
+        let results = verify_all(&client, &["main.py".into()], Some(diff)).await;
+        let r = results
+            .iter()
+            .find(|r| r.promise_id == "import-validity")
+            .unwrap();
+        assert_eq!(
+            r.result,
+            Observation::Broken,
+            "a relatively-imported symbol cxpak could not resolve is the defect this \
+             verifier exists to find; evidence: {}",
+            r.evidence
+        );
     }
 
     /// duplication: dead_symbols matching a changed file → Broken.
@@ -1244,11 +1295,15 @@ mod tests {
         );
     }
 
-    /// Empty changed_files → all 7 Kept "no files to check"; cxpak MUST NOT be called.
-    /// Mirrors JS verifyAll:511-526. Proves the short-circuit fires even with a
-    /// non-empty RecordedCxpakClient that would produce non-Kept results if called.
+    /// Empty changed_files → all 7 **Skipped** "no files to check"; cxpak MUST NOT be
+    /// called. The short-circuit was always right; the verdict was not. It returned seven
+    /// `Kept` — import-validity and security-surface at `Confidence::High` — for a turn in
+    /// which nothing was examined, so a caller that failed to populate `changed_files` got a
+    /// high-confidence clean bill and a trust EMA nudged upward (#6).
+    ///
+    /// Mirrors JS verifyAll:511-526 in *shape* only; the JS confidences are the bug.
     #[tokio::test]
-    async fn empty_changed_files_returns_all_kept_without_calling_cxpak() {
+    async fn empty_changed_files_returns_all_skipped_without_calling_cxpak() {
         // Client has recordings that would produce Broken results if consulted.
         let mut map = HashMap::new();
         map.insert("cxpak_health".to_string(), json!({"conventions": 2.0})); // would → Broken function-length
@@ -1264,8 +1319,8 @@ mod tests {
         for r in &results {
             assert_eq!(
                 r.result,
-                Observation::Kept,
-                "{} should be Kept on empty files; got {:?} evidence={}",
+                Observation::Skipped,
+                "{} must report no signal on empty files, not a pass; got {:?} evidence={}",
                 r.promise_id,
                 r.result,
                 r.evidence
@@ -1275,39 +1330,32 @@ mod tests {
                 "{} evidence mismatch",
                 r.promise_id
             );
+            // The confidence of a check that did not run is Low whatever the check is.
+            // The two that were High — import-validity and security-surface — are exactly
+            // the ones whose false Kept carried the most weight.
+            assert_eq!(
+                r.confidence,
+                Confidence::Low,
+                "{} must not carry confidence it did not earn",
+                r.promise_id
+            );
         }
-        // Verify per-verifier confidences match JS (verifyAll:514-521).
-        let conf_of = |id: &str| {
-            results
-                .iter()
-                .find(|r| r.promise_id == id)
-                .map(|r| r.confidence)
-                .unwrap()
-        };
+        // Every promise still reports, and reports once: a short-circuit that dropped a
+        // verifier would read downstream as a verifier that has nothing to say, which is a
+        // different lie from the one being fixed here.
+        let mut ids: Vec<&str> = results.iter().map(|r| r.promise_id.as_str()).collect();
+        ids.sort_unstable();
         assert_eq!(
-            conf_of("import-validity"),
-            baseplate::model::Confidence::High
-        );
-        assert_eq!(
-            conf_of("function-length"),
-            baseplate::model::Confidence::Medium
-        );
-        assert_eq!(conf_of("duplication"), baseplate::model::Confidence::Medium);
-        assert_eq!(
-            conf_of("architectural-boundary"),
-            baseplate::model::Confidence::Medium
-        );
-        assert_eq!(
-            conf_of("convention-compliance"),
-            baseplate::model::Confidence::Medium
-        );
-        assert_eq!(
-            conf_of("change-impact"),
-            baseplate::model::Confidence::Medium
-        );
-        assert_eq!(
-            conf_of("security-surface"),
-            baseplate::model::Confidence::High
+            ids,
+            [
+                "architectural-boundary",
+                "change-impact",
+                "convention-compliance",
+                "duplication",
+                "function-length",
+                "import-validity",
+                "security-surface",
+            ]
         );
     }
 }
