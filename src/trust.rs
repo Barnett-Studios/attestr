@@ -6,11 +6,57 @@ use baseplate::model::VerificationResult;
 pub const DEFAULT_DECAY: f64 = 0.85;
 pub const DEFAULT_TRUST: f64 = 0.5;
 
+/// Everything this module can fail with. Deliberately **does not expose `rusqlite`**:
+/// SQLite is the store's implementation, and a consumer that had to match on
+/// `rusqlite::Error` would take a breaking change every time that crate bumps its major —
+/// for a dependency it never chose (attestr#7).
+///
+/// `Storage` keeps the one distinction the caller can act on. `retryable` is contention
+/// (`SQLITE_BUSY`/`SQLITE_LOCKED`) that this module has *already* retried to exhaustion,
+/// so it means "the store is under sustained load, try again later", not "retry now".
 #[derive(Debug, PartialEq, Eq)]
 pub enum TrustError {
     /// `computeRunObservation([])` throws in JS — no results to observe.
     EmptyResults,
+    /// The store could not be read or written. `message` is for humans and logs; branch
+    /// on `retryable`, never on the text.
+    Storage { retryable: bool, message: String },
+    /// The file on disk was written by a newer attestr. Refusing is the whole point: an
+    /// older binary that read it anyway would interpret a schema it does not know, and a
+    /// silently-wrong trust score is worse than an unavailable one.
+    UnsupportedSchema { found: i64, supported: i64 },
 }
+
+impl std::fmt::Display for TrustError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TrustError::EmptyResults => write!(f, "no verification results to observe"),
+            TrustError::Storage { retryable, message } => {
+                let kind = if *retryable { "contention" } else { "failure" };
+                write!(f, "trust store {kind}: {message}")
+            }
+            TrustError::UnsupportedSchema { found, supported } => write!(
+                f,
+                "trust store schema v{found} is newer than this build supports (v{supported})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TrustError {}
+
+impl From<rusqlite::Error> for TrustError {
+    fn from(e: rusqlite::Error) -> Self {
+        TrustError::Storage {
+            retryable: is_busy(&e),
+            message: e.to_string(),
+        }
+    }
+}
+
+/// The schema this build writes and understands. Bump it **with** a migration arm in
+/// [`TrustStore::open`], never on its own.
+pub const SCHEMA_VERSION: i64 = 1;
 
 // EMA weights are single-sourced on the model: `Observation::value()`
 // (skipped → None, excluded) and `Confidence::weight()` (high 1.0 / medium 0.6
@@ -97,7 +143,13 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
-    pub fn open(db_path: &Path) -> rusqlite::Result<Self> {
+    /// Open (creating if absent) and bring the file to [`SCHEMA_VERSION`].
+    ///
+    /// A file predating versioning reports `user_version = 0` — indistinguishable from a
+    /// brand-new one, and that is fine: v1's schema *is* what those files already hold, so
+    /// the same `CREATE TABLE IF NOT EXISTS` covers both and the stamp records it. A file
+    /// from the future is refused rather than read (see [`TrustError::UnsupportedSchema`]).
+    pub fn open(db_path: &Path) -> Result<Self, TrustError> {
         if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -118,26 +170,43 @@ impl TrustStore {
         // test). So both statements are individually retry-guarded via
         // `busy_retry` as well.
         busy_retry(|| conn.pragma_update(None, "journal_mode", "WAL"))?;
-        busy_retry(|| {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS trust(
-                     agent_id TEXT PRIMARY KEY,
-                     trust REAL NOT NULL,
-                     updated_at TEXT NOT NULL
-                 );",
-            )
-        })?;
+
+        let found: i64 = busy_retry(|| conn.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
+        if found > SCHEMA_VERSION {
+            return Err(TrustError::UnsupportedSchema {
+                found,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        if found < SCHEMA_VERSION {
+            // The one migration arm there is. Each future version appends its own —
+            // stepwise from `found`, never a jump — so a file that skipped releases still
+            // arrives here by the same path a file that did not.
+            busy_retry(|| {
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS trust(
+                         agent_id TEXT PRIMARY KEY,
+                         trust REAL NOT NULL,
+                         updated_at TEXT NOT NULL
+                     );",
+                )
+            })?;
+            // pragma_update refuses a bound parameter for user_version, so the value is
+            // formatted in. It is a compile-time constant, not input.
+            busy_retry(|| conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};")))?;
+        }
         Ok(Self { conn })
     }
 
-    pub fn get(&self, agent_id: &str) -> rusqlite::Result<Option<f64>> {
-        self.conn
+    pub fn get(&self, agent_id: &str) -> Result<Option<f64>, TrustError> {
+        Ok(self
+            .conn
             .query_row(
                 "SELECT trust FROM trust WHERE agent_id = ?1",
                 [agent_id],
                 |r| r.get(0),
             )
-            .optional()
+            .optional()?)
     }
 
     /// Atomic RMW. `observation == None` (all skipped) preserves trust. Returns
@@ -148,8 +217,8 @@ impl TrustStore {
         observation: Option<f64>,
         decay: f64,
         now: &str,
-    ) -> rusqlite::Result<(f64, f64)> {
-        immediate_tx_retry(&mut self.conn, |tx| {
+    ) -> Result<(f64, f64), TrustError> {
+        Ok(immediate_tx_retry(&mut self.conn, |tx| {
             let before: f64 = tx
                 .query_row(
                     "SELECT trust FROM trust WHERE agent_id = ?1",
@@ -165,12 +234,12 @@ impl TrustStore {
                 rusqlite::params![agent_id, after, now],
             )?;
             Ok((before, after))
-        })
+        })?)
     }
 
     /// Unconditional set (for `trust reset`). Returns the previous value (or 0.5).
-    pub fn set(&mut self, agent_id: &str, trust: f64, now: &str) -> rusqlite::Result<f64> {
-        immediate_tx_retry(&mut self.conn, |tx| {
+    pub fn set(&mut self, agent_id: &str, trust: f64, now: &str) -> Result<f64, TrustError> {
+        Ok(immediate_tx_retry(&mut self.conn, |tx| {
             let before: f64 = tx
                 .query_row(
                     "SELECT trust FROM trust WHERE agent_id = ?1",
@@ -185,7 +254,7 @@ impl TrustStore {
                 rusqlite::params![agent_id, trust, now],
             )?;
             Ok(before)
-        })
+        })?)
     }
 }
 
@@ -347,6 +416,97 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn a_fresh_store_is_stamped_with_the_schema_version() {
+        let db = std::env::temp_dir().join(format!("trust-stamp-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let store = TrustStore::open(&db).unwrap();
+        let v: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "an unstamped file cannot be migrated later"
+        );
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn a_pre_versioning_file_is_adopted_with_its_rows_intact() {
+        // Every trust.db written before attestr#7 looks exactly like this: the v1 table,
+        // user_version 0. Adoption must be silent and lossless — treating it as foreign
+        // would discard the trust history the store exists to accumulate.
+        let db = std::env::temp_dir().join(format!("trust-adopt-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE trust(agent_id TEXT PRIMARY KEY, trust REAL NOT NULL,
+                                    updated_at TEXT NOT NULL);
+                 INSERT INTO trust VALUES ('legacy', 0.75, '<TS>');",
+            )
+            .unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 0, "control: the fixture must actually be unversioned");
+        }
+        let store = TrustStore::open(&db).unwrap();
+        assert_eq!(store.get("legacy").unwrap(), Some(0.75));
+        let v: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn a_file_from_the_future_is_refused_and_left_alone() {
+        let db = std::env::temp_dir().join(format!("trust-future-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+                .unwrap();
+        }
+        let err = match TrustStore::open(&db) {
+            Err(e) => e,
+            Ok(_) => panic!("a store from a newer schema must not open"),
+        };
+        assert_eq!(
+            err,
+            TrustError::UnsupportedSchema {
+                found: SCHEMA_VERSION + 1,
+                supported: SCHEMA_VERSION,
+            }
+        );
+        // And it must not have been quietly downgraded on the way out — an older binary
+        // that stamped the file back would make the newer one adopt a schema it wrote.
+        let conn = Connection::open(&db).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION + 1);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn storage_errors_carry_the_retryable_split_not_the_rusqlite_type() {
+        assert_eq!(
+            TrustError::from(busy_err()),
+            TrustError::Storage {
+                retryable: true,
+                message: busy_err().to_string(),
+            }
+        );
+        match TrustError::from(constraint_err()) {
+            TrustError::Storage { retryable, .. } => assert!(!retryable),
+            other => panic!("expected Storage, got {other:?}"),
+        }
     }
 
     #[test]
