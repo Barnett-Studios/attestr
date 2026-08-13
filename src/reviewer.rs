@@ -96,7 +96,72 @@ pub fn extract_text(raw: &str) -> String {
 // group 2 the JSON object. Lazy group 1 so a fence with no info string still matches.
 static FENCED: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"```([^\n`]*?)\s*(\{[\s\S]*?\})\s*```").unwrap());
-static INLINE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\{[^{}]*"action"[\s\S]*?\}"#).unwrap());
+/// Every **balanced** `{…}` object in `text`, at any nesting depth, in order of closing.
+///
+/// attestr#4. This replaces a brace-naive regex, `\{[^{}]*"action"[\s\S]*?\}`, whose
+/// `[^{}]*` forbade braces before the key and whose lazy tail stopped at the FIRST `}`. So
+/// an unfenced verdict whose feedback contained a brace — `use Map<K,V>`, "close the `}`",
+/// a snippet, an inline JSON example — produced a truncated candidate, `serde_json` refused
+/// it, and `parse_decision` fell through to `Failed` → **`Accept`**. The framework's stated
+/// value is informed retry, and the text most likely to carry a brace is exactly a detailed
+/// "retry, here is what is broken", so the mechanism converted its best output into a
+/// silent fail-open accept of broken work.
+///
+/// The two FENCED paths were already safe and are unchanged: their trailing `\s*```
+/// anchor forces the lazy `\{[\s\S]*?\}` to expand past interior braces to reach the
+/// closing fence. Verified before touching anything — a tagged fence, a plain ```json
+/// fence, a nested object, and trailing prose all parse correctly today. Only the unfenced
+/// fallback was broken, which is the path that exists for a reviewer that ignored the
+/// output contract, i.e. exactly when the parser is the only thing left.
+///
+/// String-aware, because a brace inside a JSON string is not structure: `{"a":"}"}` is one
+/// object, and a depth counter that did not track quotes would close it at the wrong place
+/// and reintroduce the same truncation from the other side.
+///
+/// Every depth, not just the outermost, because reviewer output is prose about code and an
+/// unbalanced brace in it is ordinary — "the opening `{` on line 4". Emitting only
+/// outermost objects would start a span at that stray brace, never close it, and swallow
+/// the real verdict that follows: an accept, which is the very failure being fixed. Inner
+/// objects cost nothing, since a candidate is only used if it parses AND carries a valid
+/// `action`.
+///
+/// Order of closing puts an inner object before its parent, and the caller takes candidates
+/// in reverse, so the enclosing object — the actual verdict — is tried before its own
+/// nested members.
+fn balanced_objects(text: &str) -> Vec<&str> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    let (mut in_str, mut esc) = (false, false);
+    for (i, &c) in b.iter().enumerate() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            b'"' if !starts.is_empty() => in_str = true,
+            b'{' => starts.push(i),
+            b'}' => {
+                if let Some(start) = starts.pop() {
+                    // `get` rather than slicing: a `}` at a non-char boundary cannot happen
+                    // for ASCII braces, but an unwrap here would be a panic on the
+                    // fail-open path, which is the one place that must never panic.
+                    if let Some(obj) = text.get(start..=i) {
+                        out.push(obj);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
 
 static TAG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -172,9 +237,13 @@ pub fn parse_decision_with_tag(text: &str, tag: &str) -> DecisionCore {
             fenced.push(c[2].to_string());
         }
     }
-    let inline: Vec<String> = INLINE
-        .find_iter(text)
-        .map(|m| m.as_str().to_string())
+    // Balanced scan rather than a regex (attestr#4). Filtered on `"action"` to keep the
+    // candidate set the same shape as before — any other object in the reviewer's prose is
+    // not a verdict — while no longer truncating one whose feedback contains a brace.
+    let inline: Vec<String> = balanced_objects(text)
+        .into_iter()
+        .filter(|o| o.contains("\"action\""))
+        .map(|o| o.to_string())
         .collect();
     let candidates: Vec<&String> = tagged
         .iter()
@@ -724,5 +793,99 @@ mod tests {
         assert_eq!(d.action, ReviewAction::Accept);
         assert_eq!(d.reasoning.as_deref(), Some("looks fine"));
         assert_eq!(d.parser, ReviewParser::Ok);
+    }
+}
+
+#[cfg(test)]
+mod attestr4_braces_in_feedback {
+    use super::*;
+
+    /// The defect. An unfenced verdict whose feedback contains a brace — the single most
+    /// common shape of real code-review feedback — used to truncate at the first `}`, fail
+    /// `serde_json`, and fall through to `Failed` → `Accept`. A detailed "retry, here is
+    /// what is broken" became a silent accept of broken work.
+    #[test]
+    fn an_unfenced_retry_whose_feedback_contains_a_brace_is_a_retry() {
+        let text = r#"Here is my verdict.
+{"action":"retry","feedback":"close the } on line 12 and use Map<K,V>"}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(
+            d.feedback.as_deref(),
+            Some("close the } on line 12 and use Map<K,V>"),
+            "the feedback must survive intact — a truncated one is why this fell through"
+        );
+    }
+
+    /// Same path, structural braces rather than braces in a string.
+    #[test]
+    fn an_unfenced_retry_carrying_a_nested_object_is_a_retry() {
+        let text = r#"{"action":"retry","feedback":"fix it","meta":{"rule":"complete-output"}}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("fix it"));
+    }
+
+    /// A brace inside a JSON string is not structure. A depth counter blind to quotes would
+    /// close the object at that `}` and truncate from the other direction — the same defect
+    /// with a different cause.
+    #[test]
+    fn a_brace_inside_a_string_does_not_close_the_object() {
+        let text = r#"{"action":"retry","feedback":"the literal } character"}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("the literal } character"));
+    }
+
+    /// Reviewer output is prose ABOUT code, so an unbalanced brace in it is ordinary. A
+    /// scanner that emitted only outermost objects would open a span at the stray `{`,
+    /// never close it, and swallow the verdict that follows — producing the accept this
+    /// whole change exists to remove.
+    #[test]
+    fn a_stray_unbalanced_brace_in_the_prose_does_not_swallow_the_verdict() {
+        let text = r#"The opening { on line 4 is never closed.
+{"action":"retry","feedback":"balance the braces"}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("balance the braces"));
+    }
+
+    /// The FENCED paths were NEVER brace-naive, contrary to the issue text, and this pins
+    /// that so nobody "fixes" them later. Their trailing ``\s*``` `` anchor forces the lazy
+    /// `\{[\s\S]*?\}` to expand past interior braces to reach the closing fence. Measured
+    /// before changing anything: tagged fence, plain ```json fence, nested object and
+    /// trailing prose all parsed correctly on the unmodified code. Only the unfenced
+    /// fallback was broken.
+    #[test]
+    fn the_fenced_paths_were_already_brace_safe() {
+        let tagged = "```attestr-decision-T9\n{\"action\":\"retry\",\"feedback\":\"close the } here\"}\n```\nafterword";
+        let d = parse_decision_with_tag(tagged, "T9");
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("close the } here"));
+
+        let plain = "```json\n{\"action\":\"retry\",\"feedback\":\"a } brace\"}\n```";
+        let d = parse_decision(plain);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("a } brace"));
+    }
+
+    /// The fail-open posture is unchanged: text with no valid verdict still accepts. This
+    /// change makes more verdicts *readable*; it must not invent one.
+    #[test]
+    fn output_with_no_verdict_still_fails_open_to_accept() {
+        let d = parse_decision("I looked at it and I have opinions { but no verdict }");
+        assert_eq!(d.action, ReviewAction::Accept);
+        assert_eq!(d.parser, ReviewParser::Failed);
+    }
+
+    /// `balanced_objects` emits inner objects before their parent, and the caller reverses,
+    /// so the enclosing verdict is tried first. Without that ordering a nested member
+    /// carrying its own `"action"` key would outrank the real decision.
+    #[test]
+    fn the_enclosing_object_outranks_a_nested_one_that_also_names_action() {
+        let text = r#"{"action":"retry","feedback":"real","quoted":{"action":"accept"}}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("real"));
     }
 }
