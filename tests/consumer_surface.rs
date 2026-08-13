@@ -73,6 +73,37 @@ fn a_consumer_can_construct_and_read_a_verification_result() {
     let _: attestr::verify::Method = attestr::verify::Method::Grep;
 }
 
+/// Every fallible `TrustStore` signature, bound to its error type by hand.
+///
+/// This is a compile-time assertion, not a behavioural one: naming
+/// `Result<_, attestr::trust::TrustError>` on each `fn` pointer fails to build the moment a
+/// signature goes back to leaking `rusqlite::Result`, which is the whole of attestr#7. A
+/// consumer must be able to handle a store failure without depending on the crate attestr
+/// happens to store trust in — and without taking a breaking change when that crate bumps.
+#[test]
+fn no_trust_store_method_makes_a_consumer_name_the_storage_crate() {
+    use attestr::trust::{TrustError, TrustStore};
+    use std::path::Path;
+
+    let _: fn(&Path) -> Result<TrustStore, TrustError> = TrustStore::open;
+    let _: fn(&TrustStore, &str) -> Result<Option<f64>, TrustError> = TrustStore::get;
+    // Aliased only because clippy calls the inline form too complex; the point is the
+    // `TrustError` in the return position, not the arity.
+    type UpdateAtomic =
+        fn(&mut TrustStore, &str, Option<f64>, f64, &str) -> Result<(f64, f64), TrustError>;
+    let _: UpdateAtomic = TrustStore::update_atomic;
+    let _: fn(&mut TrustStore, &str, f64, &str) -> Result<f64, TrustError> = TrustStore::set;
+
+    // And the error is usable as one: a consumer logging it needs Display, and a consumer
+    // wrapping it in its own error type needs the Error bound.
+    let e = TrustError::UnsupportedSchema {
+        found: 2,
+        supported: attestr::trust::SCHEMA_VERSION,
+    };
+    let _: &dyn std::error::Error = &e;
+    assert!(e.to_string().contains("newer than this build"));
+}
+
 /// The field types of a re-exported struct must be nameable too, or the re-export is a
 /// half-measure: a consumer holding a `PromiseSpec` and matching on `promise_type` is stopped
 /// by a type nobody thought to list. This is the case a hand-written name list would miss,

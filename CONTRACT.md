@@ -51,7 +51,8 @@ Anything conforming to this contract can drop into the Verifier slot.
 |---|---|
 | `verify::structural::verify_all(files, ctx) -> Result<Vec<Finding>>` | async; cxpak-backed structural findings for a turn's changed files. |
 | `verify::standing::verify(promise, diff) -> Vec<Finding>` | registry-driven grep/pattern assessment of a standing promise. |
-| `trust::TrustStore::open(path)` / `.get(agent)` / `.set(agent, t, now)` / `.update_atomic(..)` | the SQLite-backed per-agent trust store; `update_atomic` folds an observation under a transaction. |
+| `trust::TrustStore::open(path)` / `.get(agent)` / `.set(agent, t, now)` / `.update_atomic(..)` | the durable per-agent trust store; `update_atomic` folds an observation under a transaction. Every method returns `Result<_, trust::TrustError>`. |
+| `trust::TrustError`, `trust::SCHEMA_VERSION` | the store's own error type and on-disk schema version. |
 | `trust::compute_run_observation`, `apply_ema`, `trust_tier`, `Tier` | the EMA machinery: run results → observation → updated trust → tier. |
 | `reviewer::Reviewer::with_skills(dispatch, skills).review(req) -> ReviewDecision` | async; dispatches an informed reviewer via a `cascadr` `Provider` and returns a structured `{action, feedback}`. |
 | `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs, prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
@@ -60,6 +61,26 @@ Anything conforming to this contract can drop into the Verifier slot.
 
 | `model` (`attestr::model`) | the whole of `baseplate::model`, re-exported — the value types every signature above is written in. |
 | `reviewer::{ReviewAction, ReviewDecision, ReviewParser}` · `verify::{Confidence, Method, MethodOutcome, Observation, PromiseSpec, VerificationResult}` | the same types, aliased next to the functions that use them. Convenience; `attestr::model` is what makes the surface complete. |
+
+### The trust store owns its error type and its schema
+
+`TrustStore` is backed by SQLite, and that is an implementation detail rather than part of the
+contract. Its methods returned `rusqlite::Result` until attestr#7, which made every consumer
+depend on `rusqlite` to handle a store failure and turned that crate's next major bump into a
+breaking change to *this* surface — for a dependency the consumer never chose. They now return
+`Result<_, trust::TrustError>`: `EmptyResults`, `Storage { retryable, message }`, or
+`UnsupportedSchema`. Branch on `retryable`, never on `message`. `retryable` means contention
+(`SQLITE_BUSY`/`SQLITE_LOCKED`) that the store has **already** retried to exhaustion — "under
+sustained load, come back later", not "retry immediately".
+
+The file carries `PRAGMA user_version`, and `open()` migrates forward from whatever it finds.
+A file predating the stamp reads as version 0, which is indistinguishable from a new one and
+does not need to be distinguished: v1's schema is what those files already hold, so the same
+`CREATE TABLE IF NOT EXISTS` covers both and the stamp records it — existing trust history is
+adopted, not discarded. A file from a **newer** attestr is refused with `UnsupportedSchema`
+rather than read: this is the half that cannot be retrofitted, because an old binary that
+ignores the version happily reads a schema it does not know and returns a plausible wrong
+number. Bump `SCHEMA_VERSION` only together with a migration arm in `open()`.
 
 The value types above come from [`baseplate`](https://crates.io/crates/baseplate) (`model`), so
 they cross the Verifier boundary as stable serialized types.
