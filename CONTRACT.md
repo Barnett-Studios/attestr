@@ -17,18 +17,18 @@ Anything conforming to this contract can drop into the Verifier slot.
    *pass*: `update_trust` moves the score up on one, so issuing it for a check that could not
    have found anything is a fabricated finding in the direction nobody audits.
 
-   **In `verify::structural`** — and, today, only there — that rule is enforced end to end.
    "Cannot run" covers a verifier that ran and had nothing to examine as much as one whose
-   backend was absent: an empty `changed_files`, or a diff carrying no import the parser
-   recognises. Those report `Skipped`, with evidence saying which of the two it was, never
-   `Kept`. A structural result is `Kept`/`Broken` only where the check could have gone either
-   way.
+   backend was absent: an empty `changed_files`, a diff carrying no import the parser
+   recognises, an empty diff handed to a pattern scan. Those report `Skipped`, with evidence
+   saying which it was, never `Kept`. A result is `Kept`/`Broken` only where the check could
+   have gone either way.
 
-   `verify::behavioral` and `verify::standing` still answer `Kept` on their own
-   nothing-to-examine branches — `verify_read_before_write` does so at `Confidence::High`
-   — so a turn with an empty `changed_files` still produces a passing observation from those
-   two. Scoped here rather than claimed for the crate: it is a real gap, it is measured, and
-   it is [attestr#27](https://github.com/Barnett-Studios/attestr/issues/27).
+   This holds across all three verification families — `verify::structural`,
+   `verify::behavioral`, `verify::standing`. It has to be all three to mean anything: the
+   observation a consumer reads is one weighted average over the merged set, and a weighted
+   average of `Kept`s is 1.0 however many contributors you remove. Excluding one family
+   while another still answers `Kept` on the same condition changes the reported trust by
+   exactly nothing — measured, on this crate, between attestr#26 and #27.
 3. **Deterministic-first, reviewer-gated.** Grep (`verify::standing`) and structural
    (`verify::structural`, cxpak-backed) checks run first and are pure functions of their input.
    The `claude -p` reviewer is dispatched **only** on a finding that is broken *with high

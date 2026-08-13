@@ -120,8 +120,20 @@ pub fn verify_behavioral(
 fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> VerificationResult {
     let id = "read-before-write";
 
+    // No files to cover is not full coverage. This answered `Kept, High` — the heaviest
+    // weight there is — for a turn in which nothing was examined, so any caller that
+    // failed to populate `changed_files` got a perfect observation out of it (attestr#27).
+    //
+    // It was also the load-bearing one: structural was fixed in #26 and the composite
+    // was measured unchanged, because a weighted average of `Kept`s is 1.0 however many
+    // you remove and this verifier still supplied one at 1.0.
     if changed_files.is_empty() {
-        return mk(id, Observation::Kept, Confidence::High, "no files changed");
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "no files changed — nothing to check coverage of",
+        );
     }
 
     let reads = extract_reads(trace);
@@ -338,14 +350,22 @@ fn path_matches(f: &str, entry: &str) -> bool {
 /// touches a documented public surface, a canonical doc should have been
 /// touched too. Never blocks — `Broken` is Confidence::Low telemetry only,
 /// same tier as `read-before-write`/`exploration-breadth`/`context-acquisition`.
-/// An empty `changed_files` list fails open to `Kept` (mirroring
-/// `verify_read_before_write`'s own empty-list branch) rather than treating
-/// "unknown" as evidence of a broken promise.
+///
+/// An empty `changed_files` list reports `Skipped`. It used to fail open to `Kept`,
+/// mirroring `verify_read_before_write`'s empty-list branch, on the argument that
+/// "unknown" is not evidence of a broken promise — true, and the wrong conclusion:
+/// `Skipped` is what "unknown" reports, and `Kept` is a pass that moves the trust EMA.
+/// Both branches are fixed together because both were the same mistake (attestr#27).
 fn verify_docs_currency(changed_files: &[String], cfg: &DocsCurrency) -> VerificationResult {
     let id = "docs-currency";
 
     if changed_files.is_empty() {
-        return mk(id, Observation::Kept, Confidence::Low, "no files changed");
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "no files changed — no surface to check a doc against",
+        );
     }
 
     let surface_touched: Vec<&String> = changed_files
@@ -475,16 +495,62 @@ mod tests {
         }
     }
 
+    /// Both `changed_files.is_empty()` branches at once, because they were one mistake
+    /// and #26 measured why fixing them apart is worth nothing: the structural seven were
+    /// excluded and the composite observation did not move, since a weighted average of
+    /// `Kept`s is 1.0 however many you remove and these two still supplied one — with
+    /// `read-before-write` at 1.0, the heaviest weight in the set (attestr#27).
     #[test]
-    fn docs_currency_kept_when_no_files_changed() {
+    fn no_files_changed_is_no_signal_not_a_pass() {
         let cfg = docs_cfg();
         let results = verify_behavioral(&[], &[], None, Some(&cfg));
-        let dc = results
-            .iter()
-            .find(|r| r.promise_id == "docs-currency")
-            .unwrap();
-        assert_eq!(dc.result, Observation::Kept);
-        assert_eq!(dc.confidence, Confidence::Low);
+
+        for id in ["docs-currency", "read-before-write"] {
+            let r = results
+                .iter()
+                .find(|r| r.promise_id == id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id} must still report — a dropped verifier is a \
+                                           different lie from the one being fixed"
+                    )
+                });
+            assert_eq!(
+                r.result,
+                Observation::Skipped,
+                "{id} examined nothing and must say so; evidence: {}",
+                r.evidence
+            );
+            assert_eq!(
+                r.confidence,
+                Confidence::Low,
+                "{id} must not carry confidence it did not earn"
+            );
+            assert!(
+                r.evidence.contains("no files changed"),
+                "{id} must say WHY it skipped: {}",
+                r.evidence
+            );
+        }
+    }
+
+    /// The control. Without it, both verifiers hard-wired to `Skipped` satisfy every
+    /// assertion above while reporting nothing for the rest of time.
+    #[test]
+    fn both_still_reach_a_verdict_when_there_are_files() {
+        let cfg = docs_cfg();
+        let changed = vec!["src/main.rs".to_string()];
+        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
+
+        for id in ["docs-currency", "read-before-write"] {
+            let r = results.iter().find(|r| r.promise_id == id).unwrap();
+            assert_ne!(
+                r.result,
+                Observation::Skipped,
+                "{id} had a file to examine and must reach a real verdict; evidence: {}",
+                r.evidence
+            );
+        }
     }
 
     #[test]

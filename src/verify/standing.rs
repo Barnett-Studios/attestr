@@ -282,7 +282,11 @@ fn test_assertion_patterns(spec: &PromiseSpec, output: &str, ctx: &VerifyContext
     }
     let diff = ctx.diff.unwrap_or(output);
     if diff.is_empty() {
-        return outcome(Observation::Kept, "no diff content to scan");
+        // A pattern scan over nothing cannot find a pattern, so `Kept` here was a clean
+        // bill from a check that could not have failed. The line above already draws this
+        // distinction — `Partial` for "no patterns configured" — and this branch is the
+        // same shape with the other operand empty (attestr#27).
+        return outcome(Observation::Skipped, "no diff content to scan");
     }
 
     let mut findings: Vec<(String, String)> = Vec::new();
@@ -481,6 +485,61 @@ mod tests {
         let ctx = ctx_empty();
         let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
         assert_eq!(got.result, Observation::Partial);
+    }
+
+    /// attestr#27: a pattern scan over nothing cannot find a pattern, so `Kept` here was a
+    /// clean bill from a check that could not have failed. The line above this branch
+    /// already returns `Partial` for "no patterns configured" — this file distinguished
+    /// can't-conclude from concluded-clean everywhere except with the other operand empty.
+    #[test]
+    fn an_empty_diff_is_no_signal_not_a_pass() {
+        let spec = tap_spec(Some(JAVA_TFP), FORBIDDEN);
+        let ctx = ctx_empty();
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "evidence: {}",
+            got.evidence
+        );
+        assert!(got.evidence.contains("no diff content to scan"));
+    }
+
+    /// The control for the skip above: a non-empty diff still reaches a real verdict, in
+    /// both directions. Without it, a branch wired to `Skipped` — or a scanner that stopped
+    /// scanning — satisfies the assertion above and reports nothing forever.
+    #[test]
+    fn a_non_empty_diff_still_reaches_a_verdict() {
+        let spec = tap_spec(Some(JAVA_TFP), FORBIDDEN);
+        let offending = "--- a/src/test/FooTest.java\n+++ b/src/test/FooTest.java\n@@ -1 +1 @@\n+JsonNode n = parse(x);";
+        let ctx = ContextOwned {
+            diff: Some(offending.to_string()),
+            tokens_used: 0,
+            elapsed_ms: 0,
+        };
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Broken,
+            "a forbidden pattern in a test file is the defect this method exists to find; \
+             evidence: {}",
+            got.evidence
+        );
+
+        let clean = "--- a/src/test/FooTest.java\n+++ b/src/test/FooTest.java\n@@ -1 +1 @@\n+assertThat(r).as(FooDto.class);";
+        let ctx = ContextOwned {
+            diff: Some(clean.to_string()),
+            tokens_used: 0,
+            elapsed_ms: 0,
+        };
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Kept,
+            "a scanned diff with nothing forbidden in it IS a pass — that is the case the \
+             empty-diff branch was borrowing its answer from; evidence: {}",
+            got.evidence
+        );
     }
 
     #[test]
