@@ -24,7 +24,7 @@ flow coincides the measurement channel with the thing being measured, and makes 
 own errors load-bearing.
 
 > Part of the Barnett Studios agentic-harness toolkit → cxpak · commitward · abproof · cascadr ·
-> cordon · slicr · **attestr**
+> cordon · slicr · corpus · **attestr** · baseplate
 
 ## The three parts
 
