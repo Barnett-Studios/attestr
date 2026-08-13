@@ -77,56 +77,75 @@ pub async fn verify_all(
     changed_files: &[String],
     diff: Option<&str>,
 ) -> Vec<VerificationResult> {
-    // No files changed: all 7 verifiers short-circuit to Kept without calling cxpak.
-    // This fires when `git diff --name-only HEAD` is empty.
+    // No files changed: all 7 verifiers short-circuit WITHOUT calling cxpak, and report
+    // `Skipped` — no signal — rather than `Kept`.
+    //
+    // attestr#6. These were seven hardcoded `Kept`, two of them at `Confidence::High`, on
+    // the evidence string "no files to check". Nothing was verified, so "Kept" is a claim
+    // the code has no basis for: `Observation::Kept` feeds 1.0 into the trust EMA
+    // (`baseplate::model::Observation::value`), so an empty change set silently RAISED an
+    // agent's trust, and the promise reported verified-clean. `Skipped` returns `None` from
+    // that same function and is excluded from the average, which is the honest encoding of
+    // "this ran over nothing".
+    //
+    // The failure mode is not only the deliberate empty diff. Any upstream miss that leaves
+    // `changed_files` empty — a diff-parse gap, an unusual rename-only diff, a caller that
+    // forgot to populate it — arrives here as a full-marks pass at high confidence. A
+    // control whose green state is indistinguishable from its did-not-run state reports
+    // most confidently exactly when it knows least.
+    //
+    // The per-verifier confidences are kept at their previous values rather than flattened
+    // to Low. Confidence is a statement about the METHOD's precision, not about whether it
+    // ran this time — `Skipped` already carries the latter — and preserving them keeps the
+    // parity with the JS `verifyAll` these seven mirror.
     if changed_files.is_empty() {
         return vec![
             mk_result(
                 "import-validity",
                 "cxpak_call_graph",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::High,
                 "no files to check",
             ),
             mk_result(
                 "function-length",
                 "cxpak_health",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::Medium,
                 "no files to check",
             ),
             mk_result(
                 "duplication",
                 "cxpak_dead_code",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::Medium,
                 "no files to check",
             ),
             mk_result(
                 "architectural-boundary",
                 "cxpak_architecture",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::Medium,
                 "no files to check",
             ),
             mk_result(
                 "convention-compliance",
                 "cxpak_verify",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::Medium,
                 "no files to check",
             ),
             mk_result(
                 "change-impact",
                 "cxpak_predict",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::Medium,
                 "no files to check",
             ),
             mk_result(
                 "security-surface",
                 "cxpak_security_surface",
-                Observation::Kept,
+                Observation::Skipped,
                 Confidence::High,
                 "no files to check",
             ),
@@ -210,6 +229,29 @@ fn path_suffix_matches(a: &str, b: &str) -> bool {
 /// defect and must never block. Precision-biased: only clearly-relative imports
 /// (Python `from .`, JS/TS `from './'|'../'|'/'`); an unhandled import form under-flags
 /// (safe — a missed defect) rather than over-flags (harmful — blocks legit code).
+/// File extensions whose relative-import syntax [`relative_import_symbols`] actually parses.
+///
+/// attestr#6. This is the SPECIFICATION side of the import check: what it claims to cover.
+/// It must be read from here and never inferred from the parse result, because "the parser
+/// returned no symbols" is ambiguous between *this diff imports nothing relatively* (a real
+/// pass) and *this diff is in a language the parser has never handled* (no check at all),
+/// and those two produced the identical `Kept, High, "0 unresolved imports"`.
+///
+/// This list may only ever be a subset of what the parser handles — never a superset. An
+/// extension listed here with no parser behind it re-creates the exact defect: a
+/// high-confidence pass for a language nothing read. `the_coverage_list_never_claims_more_than_the_parser_handles`
+/// holds that direction by running a representative relative import through the parser for
+/// every entry, so adding a row without a parser fails rather than widening a false claim.
+const IMPORT_PARSED_EXTS: &[&str] = &["py", "js", "jsx", "mjs", "cjs", "ts", "tsx"];
+
+/// Split `changed_files` into the ones the import parser can read and the ones it cannot.
+fn import_parse_coverage(changed_files: &[String]) -> (Vec<&str>, Vec<&str>) {
+    changed_files.iter().map(String::as_str).partition(|f| {
+        f.rsplit_once('.')
+            .is_some_and(|(_, ext)| IMPORT_PARSED_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+    })
+}
+
 fn relative_import_symbols(diff: Option<&str>) -> std::collections::HashSet<String> {
     let mut syms = std::collections::HashSet::new();
     let Some(diff) = diff else {
@@ -301,6 +343,65 @@ fn verify_import_validity(
     let Some(cg) = cg else {
         return skipped(id, "cxpak_call_graph");
     };
+
+    // attestr#6, third instance. No diff at all means the parser has no input whatsoever,
+    // so `relative_import_symbols` returns an empty set, every unresolved callee is filtered
+    // out for not being in it, and this returned `Kept, High, "0 unresolved imports"`.
+    //
+    // The ticket names two paths to that false pass (empty `changed_files`, unparsed
+    // language); this is the same cause through a third. Fixing only the two named would
+    // leave the identical high-confidence claim reachable by a caller that omits the diff —
+    // which is exactly the upstream-miss scenario the ticket's own rationale describes.
+    if diff.is_none() {
+        return mk_result(
+            id,
+            "cxpak_call_graph",
+            Observation::Skipped,
+            Confidence::Low,
+            "no diff supplied — relative imports are read from the diff's added lines, so \
+             nothing was checked",
+        );
+    }
+
+    // Does this change contain ANY language whose relative imports the parser below can
+    // read? If not, the check cannot run, and it must say so instead of passing.
+    //
+    // `relative_import_symbols` handles Python and JS/TS only. For a Rust, Go, Java, C++ or
+    // Ruby change it returns an empty set, every unresolved callee is then filtered out for
+    // not being in it, `file_imports` is empty, and the function returned
+    // `Kept, High, "N edges, 0 unresolved imports"` — a high-confidence clean bill for a
+    // language it never looked at. The evidence string even reads like a measurement.
+    //
+    // The test is on the FILES, not on the parse result. Deciding coverage from
+    // `local_imports.is_empty()` would be the same defect one layer up: a python file that
+    // genuinely imports nothing relatively is a real pass and would be reported as a skip,
+    // and the denominator would once again come from the observation instead of from what
+    // the check claims to cover.
+    let (parsed, unparsed) = import_parse_coverage(changed_files);
+    if parsed.is_empty() {
+        let mut langs: Vec<&str> = unparsed
+            .iter()
+            .filter_map(|f| f.rsplit_once('.').map(|(_, e)| e))
+            .collect();
+        langs.sort_unstable();
+        langs.dedup();
+        return mk_result(
+            id,
+            "cxpak_call_graph",
+            Observation::Skipped,
+            Confidence::Low,
+            format!(
+                "relative-import parsing covers {} only; this change is {} — not checked",
+                IMPORT_PARSED_EXTS.join("/"),
+                if langs.is_empty() {
+                    "extensionless".to_string()
+                } else {
+                    langs.join("/")
+                }
+            ),
+        );
+    }
+
     let local_imports = relative_import_symbols(diff);
     let all_unresolved = &cg.unresolved;
     let file_imports: Vec<&Value> = all_unresolved
@@ -327,15 +428,34 @@ fn verify_import_validity(
         } else {
             String::new()
         };
+        // A mixed change stays `Kept` — the check DID run, on the files it can read — but
+        // the evidence has to name what it did not cover (attestr#6). Otherwise a change of
+        // one `.py` and forty `.rs` files reports "0 unresolved imports" full stop, which
+        // reads as a statement about the whole change set.
+        //
+        // Deliberately not `Partial`. That observation feeds 0.5 into the trust EMA and
+        // means the promise was half KEPT; this is a promise fully kept over part of the
+        // change. Bending it to mean partial coverage would put a coverage fact into a
+        // conduct score, and the two are read by different consumers.
+        let coverage_note = if unparsed.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", {} of {} file(s) not import-parseable",
+                unparsed.len(),
+                changed_files.len()
+            )
+        };
         mk_result(
             id,
             "cxpak_call_graph",
             Observation::Kept,
             Confidence::High,
             format!(
-                "cxpak_call_graph: {} edges, 0 unresolved imports{}",
+                "cxpak_call_graph: {} edges, 0 unresolved imports{}{}",
                 cg.edges.len(),
-                filter_note
+                filter_note,
+                coverage_note
             ),
         )
     } else {
@@ -826,7 +946,7 @@ fn verify_security_surface(
 
 #[cfg(test)]
 mod tests {
-    use super::{relative_import_symbols, verify_all};
+    use super::{relative_import_symbols, verify_all, IMPORT_PARSED_EXTS};
     use baseplate::cxpak::RecordedCxpakClient;
     use baseplate::model::{Confidence, Observation};
     use serde_json::json;
@@ -899,18 +1019,31 @@ mod tests {
     #[tokio::test]
     async fn structural_resolves_via_intent_tool_when_legacy_alias_absent() {
         let client = one_tool("cxpak_graph", json!({"edges": [{}], "unresolved": []}));
-        let results = verify_all(&client, &["src/foo.js".into()], None).await;
+        // A real diff in a parseable language, so import-validity actually runs. It used to
+        // be passed `None` here, which after attestr#6 is itself a reason to Skip — and
+        // then `assert_ne!(Skipped)` could no longer tell "the intent-tool did not resolve"
+        // from "there was no diff to read". A test whose signal has two causes proves
+        // neither.
+        let diff = "+import { thing } from './mod';\n";
+        let results = verify_all(&client, &["src/foo.js".into()], Some(diff)).await;
         let r = results
             .iter()
             .find(|r| r.promise_id == "import-validity")
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             r.result,
-            Observation::Skipped,
+            Observation::Kept,
             "import-validity must resolve via the cxpak_graph intent-tool with no legacy alias present; evidence: {}",
             r.evidence
         );
-        assert_eq!(r.result, Observation::Kept);
+        // And assert cxpak's payload reached the verifier, not merely that it did not skip:
+        // the edge count comes from the recorded response, so this fails if the intent-tool
+        // call returned nothing and some other path produced the Kept.
+        assert!(
+            r.evidence.contains("1 edges"),
+            "the verdict must be built from the intent-tool's response; evidence: {}",
+            r.evidence
+        );
     }
 
     /// change-impact under the cxpak 3.0.0 predict shape (no risk_score, per-file
@@ -1019,7 +1152,7 @@ mod tests {
 
     /// import-validity: no diff → cannot confirm a relative import → Kept (safe).
     #[tokio::test]
-    async fn import_validity_kept_when_diff_absent() {
+    async fn import_validity_is_skipped_when_the_diff_is_absent() {
         let client = one_tool(
             "cxpak_graph",
             json!({"edges": [], "unresolved": [
@@ -1030,7 +1163,16 @@ mod tests {
             .iter()
             .find(|r| r.promise_id == "import-validity")
             .unwrap();
-        assert_eq!(r.result, Observation::Kept, "evidence: {}", r.evidence);
+        assert_eq!(
+            r.result,
+            Observation::Skipped,
+            "no diff means the parser had no input at all — that is no signal, not a pass. \
+             This test asserted `Kept` before attestr#6, which is the defect written down \
+             as an expectation: an unresolved `missing_fn` in a changed file scored 1.0 \
+             into the trust EMA at high confidence because the caller omitted the diff. \
+             evidence: {}",
+            r.evidence
+        );
     }
 
     /// duplication: dead_symbols matching a changed file → Broken.
@@ -1244,11 +1386,158 @@ mod tests {
         );
     }
 
-    /// Empty changed_files → all 7 Kept "no files to check"; cxpak MUST NOT be called.
-    /// Mirrors JS verifyAll:511-526. Proves the short-circuit fires even with a
-    /// non-empty RecordedCxpakClient that would produce non-Kept results if called.
+    // ── attestr#6: a check that did not run must not report a pass ──────────────────
+
+    /// A Rust-only change: the import parser handles Python and JS/TS, so it read nothing.
+    /// Before this, `local_imports` came back empty, every unresolved callee was filtered
+    /// out for not being in it, and the verifier returned `Kept, High,
+    /// "cxpak_call_graph: N edges, 0 unresolved imports"` — a high-confidence clean bill,
+    /// phrased as a measurement, for a language it never looked at.
     #[tokio::test]
-    async fn empty_changed_files_returns_all_kept_without_calling_cxpak() {
+    async fn import_validity_is_skipped_for_a_language_the_parser_cannot_read() {
+        let client = one_tool(
+            "cxpak_call_graph",
+            json!({
+                "edges": [{"a": 1}],
+                "unresolved": [{"callee_name": "ghost", "caller_file": "src/lib.rs", "caller_symbol": "f"}]
+            }),
+        );
+        let diff = "+use crate::ghost;\n";
+        let results = verify_all(&client, &["src/lib.rs".into()], Some(diff)).await;
+        let r = results
+            .iter()
+            .find(|r| r.promise_id == "import-validity")
+            .unwrap();
+        assert_eq!(
+            r.result,
+            Observation::Skipped,
+            "a language the parser cannot read must yield no signal, not a pass; evidence: {}",
+            r.evidence
+        );
+        assert!(
+            r.evidence.contains("rs") && r.evidence.contains("not checked"),
+            "the evidence must name what was not covered, or the skip is as opaque as the \
+             false pass it replaces; got: {}",
+            r.evidence
+        );
+    }
+
+    /// The positive control for the case above, and the one that stops the fix from being
+    /// "skip everything". Same shape, a language the parser DOES read, no relative import
+    /// unresolved — this is a real pass and must stay `Kept` at `High`.
+    #[tokio::test]
+    async fn import_validity_still_passes_for_a_language_the_parser_does_read() {
+        let client = one_tool(
+            "cxpak_call_graph",
+            json!({
+                "edges": [{"a": 1}],
+                "unresolved": [{"callee_name": "print", "caller_file": "src/app.py", "caller_symbol": "f"}]
+            }),
+        );
+        let diff = "+from .helpers import tidy\n";
+        let results = verify_all(&client, &["src/app.py".into()], Some(diff)).await;
+        let r = results
+            .iter()
+            .find(|r| r.promise_id == "import-validity")
+            .unwrap();
+        assert_eq!(
+            r.result,
+            Observation::Kept,
+            "a parseable language with nothing unresolved is a genuine pass; evidence: {}",
+            r.evidence
+        );
+        assert_eq!(r.confidence, baseplate::model::Confidence::High);
+    }
+
+    /// A mixed change stays `Kept` — the check ran on the file it can read — but the
+    /// evidence must say the rest was not covered. "0 unresolved imports" full stop reads
+    /// as a statement about the whole change set.
+    #[tokio::test]
+    async fn a_mixed_change_passes_but_names_the_files_it_could_not_parse() {
+        let client = one_tool("cxpak_call_graph", json!({"edges": [], "unresolved": []}));
+        let files = vec!["src/app.py".to_string(), "src/lib.rs".to_string()];
+        let results = verify_all(&client, &files, Some("+from .h import t\n")).await;
+        let r = results
+            .iter()
+            .find(|r| r.promise_id == "import-validity")
+            .unwrap();
+        assert_eq!(r.result, Observation::Kept, "evidence: {}", r.evidence);
+        assert!(
+            r.evidence.contains("1 of 2 file(s) not import-parseable"),
+            "partial coverage must be stated; got: {}",
+            r.evidence
+        );
+    }
+
+    /// One representative RELATIVE import, written in the syntax genuinely characteristic
+    /// of that file extension. This is the fixture for the guard below.
+    ///
+    /// The syntax has to be the language's own. `relative_import_symbols` reads the diff's
+    /// text and knows nothing about file extensions, so feeding a JS `import ... from './m'`
+    /// line while claiming to probe `.rs` tests only that the JS branch works — which it
+    /// always does. My first version of this guard did exactly that and stayed GREEN when I
+    /// added `"rs"` to `IMPORT_PARSED_EXTS` with no parser behind it, which is the one
+    /// mutation it exists to catch.
+    const REPRESENTATIVE_RELATIVE_IMPORT: &[(&str, &str)] = &[
+        ("py", "+from .mod import probe_symbol\n"),
+        ("js", "+import { probe_symbol } from './mod';\n"),
+        ("jsx", "+import { probe_symbol } from './mod';\n"),
+        ("mjs", "+import { probe_symbol } from './mod.mjs';\n"),
+        ("cjs", "+import { probe_symbol } from './mod.cjs';\n"),
+        ("ts", "+import { probe_symbol } from './mod';\n"),
+        ("tsx", "+import { probe_symbol } from './mod';\n"),
+    ];
+
+    /// `IMPORT_PARSED_EXTS` is the specification side of the import check, and the ONLY
+    /// dangerous direction is it claiming more than the parser handles: an extension listed
+    /// with no parser behind it restores the exact defect this ticket is about — a
+    /// high-confidence pass for a language nothing read.
+    ///
+    /// So every entry must have a representative import in its OWN syntax, and that import
+    /// must actually parse. Both halves are load-bearing: without the first, a new
+    /// extension can be added with no fixture and the loop silently covers one fewer thing;
+    /// without the second, the fixture proves nothing.
+    ///
+    /// The reverse direction (the parser handles something the list omits) only
+    /// under-claims — a skip where a check was possible — and is deliberately not guarded.
+    #[test]
+    fn the_coverage_list_never_claims_more_than_the_parser_handles() {
+        for ext in IMPORT_PARSED_EXTS {
+            let diff = REPRESENTATIVE_RELATIVE_IMPORT
+                .iter()
+                .find(|(e, _)| e == ext)
+                .map(|(_, d)| *d)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "IMPORT_PARSED_EXTS claims `.{ext}` is covered but no representative \
+                         relative import is recorded for it, so nothing here checks that the \
+                         parser reads that language. Add one in ITS OWN syntax — a JS line \
+                         under a non-JS extension passes for the wrong reason."
+                    )
+                });
+            let syms = relative_import_symbols(Some(diff));
+            assert!(
+                syms.contains("probe_symbol"),
+                "IMPORT_PARSED_EXTS claims `.{ext}` is covered, but the parser extracts \
+                 nothing from a representative relative import written in its syntax. Every \
+                 file of that extension would be reported as CHECKED and pass at high \
+                 confidence with nothing having read it — the attestr#6 defect, restored. \
+                 Either add the parser or drop the extension. Got: {syms:?}"
+            );
+        }
+    }
+
+    /// Empty changed_files → all 7 **Skipped** "no files to check"; cxpak MUST NOT be
+    /// called. Proves the short-circuit fires even with a non-empty RecordedCxpakClient
+    /// that would produce non-Kept results if called.
+    ///
+    /// This test previously asserted `Kept`, which is the attestr#6 defect written down as
+    /// an expectation: nothing was verified, and `Kept` puts 1.0 into the trust EMA, so an
+    /// empty change set RAISED an agent's trust and reported the promise verified-clean.
+    /// The `Confidence` assertions below are unchanged on purpose — confidence describes
+    /// the method's precision, not whether it ran, and `Skipped` already carries that.
+    #[tokio::test]
+    async fn empty_changed_files_returns_all_skipped_without_calling_cxpak() {
         // Client has recordings that would produce Broken results if consulted.
         let mut map = HashMap::new();
         map.insert("cxpak_health".to_string(), json!({"conventions": 2.0})); // would → Broken function-length
@@ -1264,8 +1553,10 @@ mod tests {
         for r in &results {
             assert_eq!(
                 r.result,
-                Observation::Kept,
-                "{} should be Kept on empty files; got {:?} evidence={}",
+                Observation::Skipped,
+                "{} must be Skipped (no signal) on an empty change set, never Kept — Kept \
+                 scores 1.0 into the trust EMA for a check that ran over nothing; got {:?} \
+                 evidence={}",
                 r.promise_id,
                 r.result,
                 r.evidence

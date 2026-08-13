@@ -12,6 +12,24 @@ Anything conforming to this contract can drop into the Verifier slot.
 2. **Fail-open.** A verifier that cannot run (cxpak absent, registry unreadable, db locked)
    yields *no finding* and a *no-op trust delta* — never a fabricated finding or a false block.
    The absence of attestr degrades observability, never correctness.
+
+   **"Cannot run" includes running over nothing.** The encoding is `Observation::Skipped`,
+   whose `value()` is `None` and is therefore excluded from the trust EMA. `Kept` is a
+   positive claim — 1.0 into that average — and is reserved for a check that actually
+   examined something and found it sound. A verifier must return `Skipped`, not `Kept`, when:
+   the change set is empty; the input it reads was not supplied (e.g. `import-validity` with
+   no diff — relative imports are harvested from the diff's added lines); or none of the
+   changed files are in a language it can parse. `import-validity` states its coverage in
+   `IMPORT_PARSED_EXTS`, read from that list rather than inferred from whether the parse
+   produced anything, since an empty parse is ambiguous between *nothing to find* and
+   *nothing read*.
+
+   This is the sharper edge of fail-open, and attestr#6 was on the wrong side of it: seven
+   verifiers returned hardcoded `Kept` (two at `Confidence::High`) on an empty change set,
+   and `import-validity` returned `Kept, High, "0 unresolved imports"` for any Rust, Go,
+   Java or C++ change. A verifier that reports a pass where it performed no check is not
+   failing open — it is failing *silent*, and it inflates trust in exactly the turns nothing
+   was verified.
 3. **Deterministic-first, reviewer-gated.** Grep (`verify::standing`) and structural
    (`verify::structural`, cxpak-backed) checks run first and are pure functions of their input.
    The `claude -p` reviewer is dispatched **only** on a finding that is broken *with high
