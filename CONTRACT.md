@@ -33,10 +33,10 @@ Anything conforming to this contract can drop into the Verifier slot.
    `Skipped` and `Partial` are not interchangeable here. `Skipped` is *no observation*: it is
    excluded from the average and moves trust by nothing. `Partial` is an observation worth
    0.5, so it pulls a well-behaved agent down and a badly-behaved one up. An operand the spec
-   never supplied, and a backend that is not there, are `Skipped`. `Partial` is for a check
-   that ran on what it was given and could not conclude — an uncompilable regex, a
-   `file_check`/`output_structure` whose `check` string this crate does not recognise, a
-   promise naming a `method` this crate does not implement.
+   never supplied, a **method** that did not resolve, and a backend that is not there, are all
+   `Skipped`. `Partial` is for a check that ran on what it was given and could not conclude —
+   an uncompilable regex, a `file_check`/`output_structure` whose `check` string this crate
+   does not recognise.
 
    Measured on the turn a fresh install produces — promises declared, operands unset, cxpak
    not running, and one genuine `Broken` for the missing context call. Composite observation,

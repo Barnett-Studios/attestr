@@ -37,10 +37,21 @@ pub fn verify_standing_promise(
         Confidence::Low
     };
     let Some(method) = spec.method else {
-        // Non-standing / unresolved method should never reach here (callers gate
-        // on promise_type == Standing), but fail open rather than panic.
+        // Fail open rather than panic — but `Skipped`, not the `Partial` this carried until
+        // #29. Nothing ran: there is no verifier for a method that could not be resolved, so
+        // `Some(0.5)` was half a pass for a promise that was never executed. The seventh
+        // site of the same defect, after the six #28 removed — three in `behavioral.rs`
+        // (`Kept` High and `Kept` Low on "no files changed", and the blast-radius `Partial`)
+        // and three here (the `_ =>` catch-all, "no forbidden_patterns configured", "no diff
+        // content to scan") — and the one an operand-shaped enumeration misses, because what
+        // is unset here is the *method*.
+        //
+        // Latent, not live: `registry::load` refuses an unrecognised `method:` string
+        // outright (`RegistryError::UnknownStandingMethod`), so no registry can produce this
+        // state. A hand-constructed `PromiseSpec` can — `method` is `#[serde(skip)]` — and
+        // that is a real path for a published crate.
         return (
-            Observation::Partial,
+            Observation::Skipped,
             "no resolved standing method".to_string(),
             Confidence::Low,
         );
@@ -664,6 +675,33 @@ mod tests {
     //
     // The empty regex matches at every position, `"x".contains("")` is true. Three verdicts,
     // none of them about the agent.
+    /// #29. The registry cannot produce `method: None` — `registry::load` refuses an
+    /// unrecognised `method:` string with `UnknownStandingMethod` — so this state arrives
+    /// only from a hand-constructed spec, and nothing but this test can reach it.
+    #[test]
+    fn a_promise_with_no_resolved_method_is_no_signal() {
+        let mut spec = make_spec(Method::Grep);
+        spec.pattern = Some(r"\bTODO\b".to_string());
+        spec.method = None;
+        let (result, evidence, _) = verify_standing_promise(&spec, "// TODO: fix", None);
+        assert_eq!(
+            result,
+            Observation::Skipped,
+            "no verifier ran, so this is not half a pass; evidence: {evidence}"
+        );
+
+        // The control, and it is the whole reason the assertion above is not vacuous: the
+        // SAME spec with its method resolved must still reach a real verdict — here `Broken`,
+        // on input that a `grep` for `\bTODO\b` genuinely fails.
+        spec.method = Some(Method::Grep);
+        let (result, evidence, _) = verify_standing_promise(&spec, "// TODO: fix", None);
+        assert_eq!(
+            result,
+            Observation::Broken,
+            "control: a resolved method must still verify; evidence: {evidence}"
+        );
+    }
+
     #[test]
     fn an_unconfigured_operand_is_no_signal_not_a_verdict() {
         let ctx = ctx_empty();
