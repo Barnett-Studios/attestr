@@ -39,9 +39,12 @@ pub fn verify_standing_promise(
     let Some(method) = spec.method else {
         // Fail open rather than panic — but `Skipped`, not the `Partial` this carried until
         // #29. Nothing ran: there is no verifier for a method that could not be resolved, so
-        // `Some(0.5)` was half a pass for a promise that was never executed. The sixth site
-        // of the same defect #27 removed from the other five, and the one an operand-shaped
-        // enumeration misses, because what is unset here is the *method*.
+        // `Some(0.5)` was half a pass for a promise that was never executed. The seventh
+        // site of the same defect, after the six #28 removed — three in `behavioral.rs`
+        // (`Kept` High and `Kept` Low on "no files changed", and the blast-radius `Partial`)
+        // and three here (the `_ =>` catch-all, "no forbidden_patterns configured", "no diff
+        // content to scan") — and the one an operand-shaped enumeration misses, because what
+        // is unset here is the *method*.
         //
         // Latent, not live: `registry::load` refuses an unrecognised `method:` string
         // outright (`RegistryError::UnknownStandingMethod`), so no registry can produce this
