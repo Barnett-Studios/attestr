@@ -87,8 +87,30 @@ pub fn verify(
     }
 }
 
+/// The pattern the spec supplied, or the reason there is nothing to scan for.
+///
+/// `unwrap_or("")` here was not a default, it was a vacuous scan: the empty regex matches at
+/// every position of every input, so `grep` answered `Broken` and `grep_absent` answered
+/// `Kept` — on all output, including no output, with no input able to flip either. A verdict
+/// that cannot go the other way is not a measurement of the agent. The scan did not run, so
+/// it reports `Skipped` (#27).
+fn configured_pattern(spec: &PromiseSpec) -> Result<&str, MethodOutcome> {
+    match spec.pattern.as_deref() {
+        Some(p) if !p.is_empty() => Ok(p),
+        _ => Err(outcome(
+            Observation::Skipped,
+            "no pattern configured — nothing to scan for, refusing to fall back to the empty \
+             pattern",
+        )),
+    }
+}
+
 fn grep(spec: &PromiseSpec, output: &str) -> MethodOutcome {
-    let re = match compile_ci(spec.pattern.as_deref().unwrap_or("")) {
+    let pattern = match configured_pattern(spec) {
+        Ok(p) => p,
+        Err(skipped) => return skipped,
+    };
+    let re = match compile_ci(pattern) {
         Ok(r) => r,
         Err(e) => return outcome(Observation::Partial, format!("Invalid regex pattern: {e}")),
     };
@@ -110,7 +132,11 @@ fn grep(spec: &PromiseSpec, output: &str) -> MethodOutcome {
 }
 
 fn grep_absent(spec: &PromiseSpec, output: &str) -> MethodOutcome {
-    let re = match compile_ci(spec.pattern.as_deref().unwrap_or("")) {
+    let pattern = match configured_pattern(spec) {
+        Ok(p) => p,
+        Err(skipped) => return skipped,
+    };
+    let re = match compile_ci(pattern) {
         Ok(r) => r,
         Err(e) => return outcome(Observation::Partial, format!("Invalid regex pattern: {e}")),
     };
@@ -174,10 +200,33 @@ fn output_length(spec: &PromiseSpec, output: &str) -> MethodOutcome {
     }
 }
 
+/// The `check` string the spec supplied, or the reason there is nothing to check.
+///
+/// The three readers of this field split two ways once it is present — `output_contains`
+/// looks for it verbatim, `file_check`/`output_structure` ask whether they recognise it — but
+/// they had the same hole under it. `unwrap_or_default()` turned an unconfigured promise into
+/// a verdict: `"anything".contains("")` is true, so `output_contains` answered
+/// `Kept — Found "" in output` for every input, and the other two answered `Partial` (worth
+/// 0.5, so still a nudge) with an empty name in the evidence. A promise nobody configured is
+/// not half an answer and not a pass — it is no answer (#27).
+fn configured_check(spec: &PromiseSpec) -> Result<&str, MethodOutcome> {
+    match spec.check.as_deref() {
+        Some(c) if !c.is_empty() => Ok(c),
+        _ => Err(outcome(
+            Observation::Skipped,
+            "no check string configured — nothing to look for, refusing to fall back to the \
+             empty string",
+        )),
+    }
+}
+
 static TEST_FILE_REF: Lazy<Regex> =
     Lazy::new(|| compile_ci(r"\.(test|spec)\.(js|ts|jsx|tsx)|tests?/").unwrap());
 fn file_check(spec: &PromiseSpec, output: &str) -> MethodOutcome {
-    let check = spec.check.clone().unwrap_or_default().to_lowercase();
+    let check = match configured_check(spec) {
+        Ok(c) => c.to_lowercase(),
+        Err(skipped) => return skipped,
+    };
     if check.contains("test") {
         if TEST_FILE_REF.is_match(output) {
             outcome(Observation::Kept, "Test file reference found in output")
@@ -196,8 +245,11 @@ fn file_check(spec: &PromiseSpec, output: &str) -> MethodOutcome {
 }
 
 fn output_contains(spec: &PromiseSpec, output: &str) -> MethodOutcome {
-    let check = spec.check.clone().unwrap_or_default();
-    if output.contains(&check) {
+    let check = match configured_check(spec) {
+        Ok(c) => c,
+        Err(skipped) => return skipped,
+    };
+    if output.contains(check) {
         outcome(Observation::Kept, format!("Found \"{check}\" in output"))
     } else {
         outcome(
@@ -210,7 +262,10 @@ fn output_contains(spec: &PromiseSpec, output: &str) -> MethodOutcome {
 static CONSTRAINT_RE: Lazy<Regex> =
     Lazy::new(|| compile_ci(r"constraint|limitation|caveat|note:").unwrap());
 fn output_structure(spec: &PromiseSpec, output: &str) -> MethodOutcome {
-    let check = spec.check.clone().unwrap_or_default().to_lowercase();
+    let check = match configured_check(spec) {
+        Ok(c) => c.to_lowercase(),
+        Err(skipped) => return skipped,
+    };
     if check.contains("constraint") {
         if CONSTRAINT_RE.is_match(output) {
             outcome(Observation::Kept, "Constraints section detected")
@@ -258,7 +313,7 @@ static FILE_HDR: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\+\+\+\s+b?/?(.+?)(\s|
 fn test_assertion_patterns(spec: &PromiseSpec, output: &str, ctx: &VerifyContext) -> MethodOutcome {
     let tfp = match spec.test_file_pattern.as_deref() {
         Some(s) if !s.is_empty() => s,
-        _ => return outcome(Observation::Partial,
+        _ => return outcome(Observation::Skipped,
             "no test_file_pattern provided \u{2014} scope is undefined, refusing to fall back to .java$ (would widen to production code)"),
     };
     let file_re = match compile_cs(tfp) {
@@ -278,11 +333,15 @@ fn test_assertion_patterns(spec: &PromiseSpec, output: &str, ctx: &VerifyContext
         .filter_map(|p| compile_cs(&p).ok().map(|re| (p, re)))
         .collect();
     if forbidden.is_empty() {
-        return outcome(Observation::Partial, "no forbidden_patterns configured");
+        return outcome(Observation::Skipped, "no forbidden_patterns configured");
     }
     let diff = ctx.diff.unwrap_or(output);
     if diff.is_empty() {
-        return outcome(Observation::Kept, "no diff content to scan");
+        // A pattern scan over nothing cannot find a pattern, so `Kept` here was a clean
+        // bill from a check that could not have failed. The line above already draws this
+        // distinction — `Partial` for "no patterns configured" — and this branch is the
+        // same shape with the other operand empty (attestr#27).
+        return outcome(Observation::Skipped, "no diff content to scan");
     }
 
     let mut findings: Vec<(String, String)> = Vec::new();
@@ -466,21 +525,100 @@ mod tests {
         assert_eq!(got.result, Observation::Broken);
     }
 
+    // These two were `Partial` until #27 round 2. `Partial` is `Some(0.5)`, so a promise
+    // nobody configured still moved the EMA — down for a trusted agent, up for an untrusted
+    // one. An operand the spec never supplied is not half an answer, it is no answer.
     #[test]
-    fn anti_widening_guard_missing_tfp_returns_partial() {
+    fn anti_widening_guard_missing_tfp_is_no_signal() {
         let spec = tap_spec(None, FORBIDDEN);
         let ctx = ctx_empty();
         let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
-        assert_eq!(got.result, Observation::Partial);
+        assert_eq!(got.result, Observation::Skipped);
         assert!(got.evidence.contains("no test_file_pattern provided"));
     }
 
     #[test]
-    fn anti_widening_guard_empty_tfp_returns_partial() {
+    fn anti_widening_guard_empty_tfp_is_no_signal() {
         let spec = tap_spec(Some(""), FORBIDDEN);
         let ctx = ctx_empty();
         let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
-        assert_eq!(got.result, Observation::Partial);
+        assert_eq!(got.result, Observation::Skipped);
+    }
+
+    #[test]
+    fn no_forbidden_patterns_is_no_signal() {
+        let spec = tap_spec(Some(JAVA_TFP), &[]);
+        let ctx = ContextOwned {
+            diff: Some(
+                "--- a/src/test/FooTest.java\n+++ b/src/test/FooTest.java\n@@ -1 +1 @@\n+JsonNode n;"
+                    .to_string(),
+            ),
+            tokens_used: 0,
+            elapsed_ms: 0,
+        };
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "a scan with nothing forbidden to scan FOR cannot fail, even over a diff that \
+             would have failed it; evidence: {}",
+            got.evidence
+        );
+    }
+
+    /// attestr#27: a pattern scan over nothing cannot find a pattern, so `Kept` here was a
+    /// clean bill from a check that could not have failed. The two branches above this one
+    /// already refused for a missing operand — this file distinguished can't-conclude from
+    /// concluded-clean everywhere except with the other operand empty.
+    #[test]
+    fn an_empty_diff_is_no_signal_not_a_pass() {
+        let spec = tap_spec(Some(JAVA_TFP), FORBIDDEN);
+        let ctx = ctx_empty();
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "evidence: {}",
+            got.evidence
+        );
+        assert!(got.evidence.contains("no diff content to scan"));
+    }
+
+    /// The control for the skip above: a non-empty diff still reaches a real verdict, in
+    /// both directions. Without it, a branch wired to `Skipped` — or a scanner that stopped
+    /// scanning — satisfies the assertion above and reports nothing forever.
+    #[test]
+    fn a_non_empty_diff_still_reaches_a_verdict() {
+        let spec = tap_spec(Some(JAVA_TFP), FORBIDDEN);
+        let offending = "--- a/src/test/FooTest.java\n+++ b/src/test/FooTest.java\n@@ -1 +1 @@\n+JsonNode n = parse(x);";
+        let ctx = ContextOwned {
+            diff: Some(offending.to_string()),
+            tokens_used: 0,
+            elapsed_ms: 0,
+        };
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Broken,
+            "a forbidden pattern in a test file is the defect this method exists to find; \
+             evidence: {}",
+            got.evidence
+        );
+
+        let clean = "--- a/src/test/FooTest.java\n+++ b/src/test/FooTest.java\n@@ -1 +1 @@\n+assertThat(r).as(FooDto.class);";
+        let ctx = ContextOwned {
+            diff: Some(clean.to_string()),
+            tokens_used: 0,
+            elapsed_ms: 0,
+        };
+        let got = verify(Method::TestAssertionPatterns, &spec, "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Kept,
+            "a scanned diff with nothing forbidden in it IS a pass — that is the case the \
+             empty-diff branch was borrowing its answer from; evidence: {}",
+            got.evidence
+        );
     }
 
     #[test]
@@ -510,5 +648,108 @@ mod tests {
         assert_eq!(got.result, Observation::Broken);
         assert!(got.evidence.contains("src/test/FooTest.java"));
         assert!(got.evidence.contains(r"\bJsonNode\b"));
+    }
+
+    // #27 round 2. The property under test is NOT "no method answers `Kept` when it cannot
+    // fail" — that phrasing is what let this hide, because it enumerates one direction. It is
+    // **a verdict must be falsifiable**: for every `Kept`/`Broken` a method can emit, some
+    // reachable input has to produce the other one. `grep` breaks it in the `Broken`
+    // direction and no scan of `Kept` sites would ever have found it.
+    //
+    // Measured on `a81d5a2`, spec operand absent, over two inputs (real text and ""):
+    //
+    //   Grep         -> Broken / "Found 23 match(es): , , "     both inputs
+    //   GrepAbsent   -> Kept   / "Required pattern found: , , " both inputs
+    //   OutputContains -> Kept / "Found \"\" in output"          both inputs
+    //
+    // The empty regex matches at every position, `"x".contains("")` is true. Three verdicts,
+    // none of them about the agent.
+    #[test]
+    fn an_unconfigured_operand_is_no_signal_not_a_verdict() {
+        let ctx = ctx_empty();
+        // Every method that reads `pattern` or `check`. `file_check` and `output_structure`
+        // did not emit a false verdict — they answered `Partial`, which is `Some(0.5)` and so
+        // still moved the score for a promise nobody configured. Same hole, smaller hole.
+        for method in [
+            Method::Grep,
+            Method::GrepAbsent,
+            Method::OutputContains,
+            Method::FileCheck,
+            Method::OutputStructure,
+        ] {
+            // Both spellings of "not supplied". `Some("")` reaches the identical vacuous
+            // scan, so guarding only on `None` would leave the defect one YAML edit away.
+            for spec in [make_spec(method), {
+                let mut s = make_spec(method);
+                s.pattern = Some(String::new());
+                s.check = Some(String::new());
+                s
+            }] {
+                for output in ["some real agent output", ""] {
+                    let got = verify(method, &spec, output, &ctx.borrow());
+                    assert_eq!(
+                        got.result,
+                        Observation::Skipped,
+                        "{method:?} with no operand over {output:?} must report no signal, \
+                         got {:?} / {}",
+                        got.result,
+                        got.evidence
+                    );
+                }
+            }
+        }
+    }
+
+    // The control. Without it, three methods hardwired to `Skipped` would satisfy every
+    // assertion above while verifying nothing at all — and each method has to reach BOTH
+    // verdicts, because reaching only one is the defect this pair of tests is about.
+    #[test]
+    fn a_configured_operand_still_reaches_both_verdicts() {
+        let ctx = ctx_empty();
+        let cases: &[(Method, &str, &str, &str)] = &[
+            // (method, operand, input that must be Kept, input that must be Broken)
+            (Method::Grep, r"\bTODO\b", "clean output", "// TODO: later"),
+            (
+                Method::GrepAbsent,
+                r"\bhandled\b",
+                "the error is handled",
+                "no such word here",
+            ),
+            (
+                Method::OutputContains,
+                "constraint",
+                "one constraint applies",
+                "nothing of the sort",
+            ),
+            (
+                Method::FileCheck,
+                "test",
+                "wrote src/foo.test.ts",
+                "wrote src/foo.ts",
+            ),
+            (
+                Method::OutputStructure,
+                "constraint",
+                "Note: one caveat applies",
+                "nothing of the sort",
+            ),
+        ];
+        for &(method, operand, kept_in, broken_in) in cases {
+            let mut spec = make_spec(method);
+            spec.pattern = Some(operand.to_string());
+            spec.check = Some(operand.to_string());
+            for (input, want) in [
+                (kept_in, Observation::Kept),
+                (broken_in, Observation::Broken),
+            ] {
+                let got = verify(method, &spec, input, &ctx.borrow());
+                assert_eq!(
+                    got.result, want,
+                    "{method:?} with operand {operand:?} over {input:?} must be {want:?}, \
+                     got {:?} / {}",
+                    got.result, got.evidence
+                );
+            }
+        }
     }
 }

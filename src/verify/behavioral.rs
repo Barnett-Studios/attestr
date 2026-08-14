@@ -55,12 +55,25 @@ fn path_covered_by(changed: &str, covered: &HashSet<&str>) -> bool {
 /// Union of `direct_dependents`, `transitive_dependents`, and `test_files` arrays
 /// at the top level of the blast_radius object. Items may be strings or
 /// `{file:…}` / `{path:…}` objects. Deduplicates.
-fn extract_related_files(blast_radius: &Value) -> Vec<String> {
+/// The related-file set, or `None` when this parser could not read the answer cxpak gave.
+///
+/// The distinction is the whole of #27 for this verifier. An empty result used to mean two
+/// different things and the caller could not tell them apart: *cxpak says nothing is related
+/// to this file*, which discharges the promise and is an honest `Kept`, and *cxpak said
+/// something this parser does not recognise*, which is ignorance and must not be reported as
+/// a pass. A key present but not an array, or an item in a shape none of the three arms
+/// match, is the second — it was silently `continue`d, and the vacuous 0/0 pass that followed
+/// was a clean bill from a check that had not read anything.
+///
+/// An **absent** key is neither: cxpak omitting `test_files` means there are no test files,
+/// not that it failed to say.
+fn extract_related_files(blast_radius: &Value) -> Option<Vec<String>> {
     let mut files: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for key in ["direct_dependents", "transitive_dependents", "test_files"] {
-        let Some(arr) = blast_radius.get(key).and_then(|v| v.as_array()) else {
-            continue;
+        let arr = match blast_radius.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(v) => v.as_array()?,
         };
         for item in arr {
             let path = if let Some(s) = item.as_str() {
@@ -70,14 +83,14 @@ fn extract_related_files(blast_radius: &Value) -> Vec<String> {
             } else if let Some(s) = item.get("path").and_then(|v| v.as_str()) {
                 s.to_string()
             } else {
-                continue;
+                return None;
             };
             if seen.insert(path.clone()) {
                 files.push(path);
             }
         }
     }
-    files
+    Some(files)
 }
 
 /// True if `name` is a cxpak context tool: strips `mcp__<server>__` prefix,
@@ -120,8 +133,20 @@ pub fn verify_behavioral(
 fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> VerificationResult {
     let id = "read-before-write";
 
+    // No files to cover is not full coverage. This answered `Kept, High` — the heaviest
+    // weight there is — for a turn in which nothing was examined, so any caller that
+    // failed to populate `changed_files` got a perfect observation out of it (attestr#27).
+    //
+    // It was also the load-bearing one: structural was fixed in #26 and the composite
+    // was measured unchanged, because a weighted average of `Kept`s is 1.0 however many
+    // you remove and this verifier still supplied one at 1.0.
     if changed_files.is_empty() {
-        return mk(id, Observation::Kept, Confidence::High, "no files changed");
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "no files changed — nothing to check coverage of",
+        );
     }
 
     let reads = extract_reads(trace);
@@ -197,11 +222,15 @@ fn verify_exploration_breadth(trace: &[Value], blast_radius: Option<&Value>) -> 
     let id = "exploration-breadth";
 
     // Treat JSON null the same as absent (JS: `if (!blastRadiusResponse) return partial`).
+    // `Skipped`, not the `Partial` this carried until #27: an absent backend is guarantee 2's
+    // own headline case, and it promises a *no-op* trust delta. `Partial` is `Some(0.5)`,
+    // which moves the score — down for a trusted agent, up for an untrusted one — on the
+    // strength of cxpak not being installed.
     let br = match blast_radius.filter(|v| !v.is_null()) {
         None => {
             return mk(
                 id,
-                Observation::Partial,
+                Observation::Skipped,
                 Confidence::Low,
                 "cxpak_blast_radius unavailable",
             )
@@ -210,9 +239,19 @@ fn verify_exploration_breadth(trace: &[Value], blast_radius: Option<&Value>) -> 
     };
 
     let reads = extract_reads(trace);
-    let related = extract_related_files(br);
+    let Some(related) = extract_related_files(br) else {
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "blast_radius in an unrecognised shape — the related set was not read",
+        );
+    };
 
     if related.is_empty() {
+        // Reached only when the shape WAS read and the set is genuinely empty, so the
+        // obligation is discharged rather than unknown. That is a real pass, and it is why
+        // the branch above has to exist to carry the other meaning.
         return mk(
             id,
             Observation::Kept,
@@ -338,14 +377,22 @@ fn path_matches(f: &str, entry: &str) -> bool {
 /// touches a documented public surface, a canonical doc should have been
 /// touched too. Never blocks — `Broken` is Confidence::Low telemetry only,
 /// same tier as `read-before-write`/`exploration-breadth`/`context-acquisition`.
-/// An empty `changed_files` list fails open to `Kept` (mirroring
-/// `verify_read_before_write`'s own empty-list branch) rather than treating
-/// "unknown" as evidence of a broken promise.
+///
+/// An empty `changed_files` list reports `Skipped`. It used to fail open to `Kept`,
+/// mirroring `verify_read_before_write`'s empty-list branch, on the argument that
+/// "unknown" is not evidence of a broken promise — true, and the wrong conclusion:
+/// `Skipped` is what "unknown" reports, and `Kept` is a pass that moves the trust EMA.
+/// Both branches are fixed together because both were the same mistake (attestr#27).
 fn verify_docs_currency(changed_files: &[String], cfg: &DocsCurrency) -> VerificationResult {
     let id = "docs-currency";
 
     if changed_files.is_empty() {
-        return mk(id, Observation::Kept, Confidence::Low, "no files changed");
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "no files changed — no surface to check a doc against",
+        );
     }
 
     let surface_touched: Vec<&String> = changed_files
@@ -466,6 +513,77 @@ mod tests {
         assert_eq!(eb.evidence, "0/3 related files explored (0%)");
     }
 
+    /// #27 round 2. `extract_related_files` silently `continue`d past every shape it did not
+    /// recognise, so a `blast_radius` this parser cannot read produced an empty set — and an
+    /// empty set was `Kept`. Three ways to get there, all of them ignorance reported as a
+    /// pass, none of them distinguishable at the call site until the return type could say so.
+    #[test]
+    fn an_unreadable_blast_radius_is_no_signal_not_a_pass() {
+        let unreadable = [
+            // A key present but not an array. cxpak answering with an error object under
+            // `direct_dependents` is the realistic case.
+            json!({ "direct_dependents": { "error": "index cold" } }),
+            json!({ "direct_dependents": "a.js" }),
+            // Items in a shape none of the three arms match: the set is real and non-empty
+            // and every element of it was dropped.
+            json!({ "test_files": [{ "filename": "a.test.js" }] }),
+        ];
+        for br in unreadable {
+            let results = verify_behavioral(&[], &[], Some(&br), None);
+            let eb = results
+                .iter()
+                .find(|r| r.promise_id == "exploration-breadth")
+                .unwrap();
+            assert_eq!(
+                eb.result,
+                Observation::Skipped,
+                "{br} is not a related-file set this parser read; evidence: {}",
+                eb.evidence
+            );
+        }
+    }
+
+    /// The control for the branch above, and the reason it is a branch rather than a blanket
+    /// `Skipped` on empty. These two produce the same empty `Vec` and mean opposite things.
+    #[test]
+    fn a_readable_but_empty_blast_radius_is_still_a_pass() {
+        for br in [
+            json!({ "direct_dependents": [], "transitive_dependents": [], "test_files": [] }),
+            // Absent key ≠ unreadable key: cxpak omitting `test_files` says there are none.
+            json!({ "direct_dependents": [] }),
+            json!({ "direct_dependents": [], "test_files": null }),
+        ] {
+            let results = verify_behavioral(&[], &[], Some(&br), None);
+            let eb = results
+                .iter()
+                .find(|r| r.promise_id == "exploration-breadth")
+                .unwrap();
+            assert_eq!(
+                eb.result,
+                Observation::Kept,
+                "{br} was read and is genuinely empty — the promise is discharged, not \
+                 unknown; evidence: {}",
+                eb.evidence
+            );
+        }
+    }
+
+    /// An absent backend is guarantee 2's headline case and it promises a *no-op* delta.
+    /// This was `Partial` (`Some(0.5)`), which moves the score on the strength of cxpak not
+    /// being installed.
+    #[test]
+    fn an_absent_blast_radius_moves_trust_by_nothing() {
+        for br in [None, Some(json!(null))] {
+            let results = verify_behavioral(&[], &[], br.as_ref(), None);
+            let eb = results
+                .iter()
+                .find(|r| r.promise_id == "exploration-breadth")
+                .unwrap();
+            assert_eq!(eb.result, Observation::Skipped);
+            assert_eq!(eb.evidence, "cxpak_blast_radius unavailable");
+        }
+    }
+
     /// A representative host file map: a CLI directory prefix and an entry-point
     /// file are surfaces; only the root README is canonical.
     fn docs_cfg() -> DocsCurrency {
@@ -475,16 +593,62 @@ mod tests {
         }
     }
 
+    /// Both `changed_files.is_empty()` branches at once, because they were one mistake
+    /// and #26 measured why fixing them apart is worth nothing: the structural seven were
+    /// excluded and the composite observation did not move, since a weighted average of
+    /// `Kept`s is 1.0 however many you remove and these two still supplied one — with
+    /// `read-before-write` at 1.0, the heaviest weight in the set (attestr#27).
     #[test]
-    fn docs_currency_kept_when_no_files_changed() {
+    fn no_files_changed_is_no_signal_not_a_pass() {
         let cfg = docs_cfg();
         let results = verify_behavioral(&[], &[], None, Some(&cfg));
-        let dc = results
-            .iter()
-            .find(|r| r.promise_id == "docs-currency")
-            .unwrap();
-        assert_eq!(dc.result, Observation::Kept);
-        assert_eq!(dc.confidence, Confidence::Low);
+
+        for id in ["docs-currency", "read-before-write"] {
+            let r = results
+                .iter()
+                .find(|r| r.promise_id == id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{id} must still report — a dropped verifier is a \
+                                           different lie from the one being fixed"
+                    )
+                });
+            assert_eq!(
+                r.result,
+                Observation::Skipped,
+                "{id} examined nothing and must say so; evidence: {}",
+                r.evidence
+            );
+            assert_eq!(
+                r.confidence,
+                Confidence::Low,
+                "{id} must not carry confidence it did not earn"
+            );
+            assert!(
+                r.evidence.contains("no files changed"),
+                "{id} must say WHY it skipped: {}",
+                r.evidence
+            );
+        }
+    }
+
+    /// The control. Without it, both verifiers hard-wired to `Skipped` satisfy every
+    /// assertion above while reporting nothing for the rest of time.
+    #[test]
+    fn both_still_reach_a_verdict_when_there_are_files() {
+        let cfg = docs_cfg();
+        let changed = vec!["src/main.rs".to_string()];
+        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
+
+        for id in ["docs-currency", "read-before-write"] {
+            let r = results.iter().find(|r| r.promise_id == id).unwrap();
+            assert_ne!(
+                r.result,
+                Observation::Skipped,
+                "{id} had a file to examine and must reach a real verdict; evidence: {}",
+                r.evidence
+            );
+        }
     }
 
     #[test]

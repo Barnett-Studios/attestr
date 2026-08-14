@@ -17,18 +17,47 @@ Anything conforming to this contract can drop into the Verifier slot.
    *pass*: `update_trust` moves the score up on one, so issuing it for a check that could not
    have found anything is a fabricated finding in the direction nobody audits.
 
-   **In `verify::structural`** — and, today, only there — that rule is enforced end to end.
    "Cannot run" covers a verifier that ran and had nothing to examine as much as one whose
-   backend was absent: an empty `changed_files`, or a diff carrying no import the parser
-   recognises. Those report `Skipped`, with evidence saying which of the two it was, never
-   `Kept`. A structural result is `Kept`/`Broken` only where the check could have gone either
-   way.
+   backend was absent: an empty `changed_files`, a diff carrying no import the parser
+   recognises, an empty diff handed to a pattern scan, a `grep`/`grep_absent`/`output_contains`
+   promise whose spec supplied no pattern or check string. Those report `Skipped`, with
+   evidence saying which it was.
 
-   `verify::behavioral` and `verify::standing` still answer `Kept` on their own
-   nothing-to-examine branches — `verify_read_before_write` does so at `Confidence::High`
-   — so a turn with an empty `changed_files` still produces a passing observation from those
-   two. Scoped here rather than claimed for the crate: it is a real gap, it is measured, and
-   it is [attestr#27](https://github.com/Barnett-Studios/attestr/issues/27).
+   **The property is that a verdict must be falsifiable**, and it is symmetric: for every
+   `Kept` and every `Broken` a method can emit, some reachable input has to produce the other
+   one. Stating it as "never a false `Kept`" is the weaker half and it hides real defects —
+   an absent `pattern` used to compile to the empty regex, which matches at every position of
+   every input, so `grep_absent` answered `Kept` on all output and `grep` answered `Broken`
+   on all output. Enumerating the `Kept` sites finds the first and cannot see the second.
+
+   `Skipped` and `Partial` are not interchangeable here. `Skipped` is *no observation*: it is
+   excluded from the average and moves trust by nothing. `Partial` is an observation worth
+   0.5, so it pulls a well-behaved agent down and a badly-behaved one up. An operand the spec
+   never supplied, and a backend that is not there, are `Skipped`. `Partial` is for a check
+   that ran on what it was given and could not conclude — an uncompilable regex, a
+   `file_check`/`output_structure` whose `check` string this crate does not recognise, a
+   promise naming a `method` this crate does not implement.
+
+   Measured on the turn a fresh install produces — promises declared, operands unset, cxpak
+   not running, and one genuine `Broken` for the missing context call. Composite observation,
+   and the EMA at decay 0.85 for an agent already at 0.10:
+
+   | | composite | trust 0.10 → |
+   |---|---|---|
+   | before | `Some(0.571)` | 0.171 (**+0.071**) |
+   | the two false `Kept`s alone | `Some(0.400)` | 0.145 (**+0.045**) |
+   | every unsupplied operand | `Some(0.000)` | 0.085 (−0.015) |
+
+   The middle row is why the guarantee has to name `Partial` and not only `Kept`: with the
+   two false passes gone, a turn whose sole real observation is a failure still *raised* the
+   score of an untrusted agent, on the strength of four promises nobody had configured.
+
+   This holds across all three verification families — `verify::structural`,
+   `verify::behavioral`, `verify::standing`. It has to be all three to mean anything: the
+   observation a consumer reads is one weighted average over the merged set, and a weighted
+   average of `Kept`s is 1.0 however many contributors you remove. Excluding one family
+   while another still answers `Kept` on the same condition changes the reported trust by
+   exactly nothing — measured, on this crate, between attestr#26 and #27.
 3. **Deterministic-first, reviewer-gated.** Grep (`verify::standing`) and structural
    (`verify::structural`, cxpak-backed) checks run first and are pure functions of their input.
    The `claude -p` reviewer is dispatched **only** on a finding that is broken *with high
