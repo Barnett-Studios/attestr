@@ -19,9 +19,38 @@ Anything conforming to this contract can drop into the Verifier slot.
 
    "Cannot run" covers a verifier that ran and had nothing to examine as much as one whose
    backend was absent: an empty `changed_files`, a diff carrying no import the parser
-   recognises, an empty diff handed to a pattern scan. Those report `Skipped`, with evidence
-   saying which it was, never `Kept`. A result is `Kept`/`Broken` only where the check could
-   have gone either way.
+   recognises, an empty diff handed to a pattern scan, a `grep`/`grep_absent`/`output_contains`
+   promise whose spec supplied no pattern or check string. Those report `Skipped`, with
+   evidence saying which it was.
+
+   **The property is that a verdict must be falsifiable**, and it is symmetric: for every
+   `Kept` and every `Broken` a method can emit, some reachable input has to produce the other
+   one. Stating it as "never a false `Kept`" is the weaker half and it hides real defects —
+   an absent `pattern` used to compile to the empty regex, which matches at every position of
+   every input, so `grep_absent` answered `Kept` on all output and `grep` answered `Broken`
+   on all output. Enumerating the `Kept` sites finds the first and cannot see the second.
+
+   `Skipped` and `Partial` are not interchangeable here. `Skipped` is *no observation*: it is
+   excluded from the average and moves trust by nothing. `Partial` is an observation worth
+   0.5, so it pulls a well-behaved agent down and a badly-behaved one up. An operand the spec
+   never supplied, and a backend that is not there, are `Skipped`. `Partial` is for a check
+   that ran on what it was given and could not conclude — an uncompilable regex, a
+   `file_check`/`output_structure` whose `check` string this crate does not recognise, a
+   promise naming a `method` this crate does not implement.
+
+   Measured on the turn a fresh install produces — promises declared, operands unset, cxpak
+   not running, and one genuine `Broken` for the missing context call. Composite observation,
+   and the EMA at decay 0.85 for an agent already at 0.10:
+
+   | | composite | trust 0.10 → |
+   |---|---|---|
+   | before | `Some(0.571)` | 0.171 (**+0.071**) |
+   | the two false `Kept`s alone | `Some(0.400)` | 0.145 (**+0.045**) |
+   | every unsupplied operand | `Some(0.000)` | 0.085 (−0.015) |
+
+   The middle row is why the guarantee has to name `Partial` and not only `Kept`: with the
+   two false passes gone, a turn whose sole real observation is a failure still *raised* the
+   score of an untrusted agent, on the strength of four promises nobody had configured.
 
    This holds across all three verification families — `verify::structural`,
    `verify::behavioral`, `verify::standing`. It has to be all three to mean anything: the
