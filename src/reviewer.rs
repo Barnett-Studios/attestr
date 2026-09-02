@@ -129,10 +129,50 @@ static FENCED: Lazy<Regex> =
 /// nested members.
 fn balanced_objects(text: &str) -> Vec<&str> {
     let b = text.as_bytes();
-    let mut out = Vec::new();
-    let mut starts: Vec<usize> = Vec::new();
+    // Every `{` gets its own scan, with its own string state. #34: a single pass carried
+    // `in_str` across text that is not JSON, and the reviewer's prose decides that state.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (start, _) in b.iter().enumerate().filter(|(_, &c)| c == b'{') {
+        scan_object_from(text, start, &mut spans);
+    }
+    // By END position, which reproduces the old emission order exactly — that loop pushed
+    // on `}`, so it emitted in closing order — and is what makes the caller's `.rev()` try
+    // an enclosing object before its own nested members. The `start` tie-break is only there
+    // to make the order total: two spans sharing a closing brace would have to be balanced
+    // from different depths at the same `}`, and I could not construct an input that does
+    // it. It is determinism, not a defence.
+    spans.sort_unstable_by_key(|&(start, end)| (end, start));
+    spans.dedup();
+    spans
+        .into_iter()
+        .filter_map(|(s, e)| text.get(s..=e))
+        .collect()
+}
+
+/// Balance the one candidate object beginning at `start`, appending its `(start, end)`.
+///
+/// Nested objects are NOT emitted here, and do not need to be: every `{` in the text is a
+/// `start` in its own right, so an inner object is collected by its own scan. The old single
+/// pass had to emit them inline because it only ever ran once.
+///
+/// Fresh `in_str`/`esc` per call is the entire point (#34). The old single pass entered
+/// string mode on any `"` once some `{` had been seen, so a reviewer that quoted a brace —
+/// `emitted a stray "{" character` — inverted the parity: the quote CLOSING the prose span
+/// opened a JSON string, and the real verdict's `{` was consumed as string content. No
+/// candidate was emitted for it, nothing parsed, and the fail-open path returned `accept`.
+///
+/// Neither "ignore quotes outside an object" nor "let every quote toggle" can work, because
+/// the state is being carried across a region that is not JSON: the first loses the parity
+/// to a quoted brace, the second loses it to an odd number of prose quotes. Both are tested.
+///
+/// Scanning from every `{` is O(text × braces). Reviewer output is a few KB of prose with a
+/// handful of braces, so the constant is what matters and it is small; the alternative
+/// (deciding which braces are "real" before parsing) is the guess that produced this bug.
+fn scan_object_from(text: &str, start: usize, spans: &mut Vec<(usize, usize)>) {
+    let b = text.as_bytes();
+    let mut starts: Vec<usize> = vec![start];
     let (mut in_str, mut esc) = (false, false);
-    for (i, &c) in b.iter().enumerate() {
+    for (i, &c) in b.iter().enumerate().skip(start + 1) {
         if in_str {
             if esc {
                 esc = false;
@@ -144,22 +184,32 @@ fn balanced_objects(text: &str) -> Vec<&str> {
             continue;
         }
         match c {
-            b'"' if !starts.is_empty() => in_str = true,
+            b'"' => in_str = true,
             b'{' => starts.push(i),
             b'}' => {
-                if let Some(start) = starts.pop() {
-                    // `get` rather than slicing: a `}` at a non-char boundary cannot happen
-                    // for ASCII braces, but an unwrap here would be a panic on the
-                    // fail-open path, which is the one place that must never panic.
-                    if let Some(obj) = text.get(start..=i) {
-                        out.push(obj);
-                    }
+                // Unreachable by construction — `starts` begins non-empty and the scan
+                // returns the moment it empties — but written as a `let else` rather than
+                // an unwrap because a panic on the fail-open path is the one outcome this
+                // crate must never produce.
+                let Some(open) = starts.pop() else { return };
+                if !starts.is_empty() {
+                    continue;
                 }
+                // `get` rather than slicing: a `}` at a non-char boundary cannot happen
+                // for ASCII braces, but an unwrap here would be a panic on the fail-open
+                // path, which is the one place that must never panic.
+                if text.get(open..=i).is_some() {
+                    spans.push((open, i));
+                }
+                // This candidate is closed; stop. A bound on work rather than a
+                // correctness guard — anything a longer scan found would be a duplicate of
+                // what that brace's own scan produces, and duplicates are deduped. Measured:
+                // removing this `return` leaves every test green.
+                return;
             }
             _ => {}
         }
     }
-    out
 }
 
 static TAG_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -891,6 +941,78 @@ mod attestr4_braces_in_feedback {
         let d = parse_decision("I looked at it and I have opinions { but no verdict }");
         assert_eq!(d.action, ReviewAction::Accept);
         assert_eq!(d.parser, ReviewParser::Failed);
+    }
+
+    /// #21's scan carried string state across prose. A `"` was ignored until some `{`
+    /// appeared, so a reviewer that QUOTED a brace inverted the parity from that point on:
+    /// the quote closing the prose span was read as the quote opening a JSON string, and the
+    /// real verdict's own `{` was swallowed as string content. No candidate, no parse, and
+    /// `parse_decision` fails open to accept — #10's outcome through the door #21 built.
+    ///
+    /// v0.4.1's regex handled this shape; #21 traded it for the brace-in-feedback shape
+    /// below. Both rows live here so a future rewrite cannot trade one back.
+    #[test]
+    fn a_quoted_brace_before_an_unfenced_verdict_does_not_swallow_it() {
+        let text = "The agent emitted a stray \"{\" character.\n\
+                    {\"action\":\"retry\",\"feedback\":\"fix the brace\"}";
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("fix the brace"));
+    }
+
+    /// An escaped quote inside the feedback must not end the string early. Untested before
+    /// this — the escape handling has been in the scan since #21 and nothing pinned it, so a
+    /// rewrite that dropped it would have truncated the object at the escaped quote and
+    /// failed open to accept, silently.
+    #[test]
+    fn an_escaped_quote_inside_the_feedback_does_not_truncate_the_object() {
+        let text = r#"{"action":"retry","feedback":"it printed \" then stopped"}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some(r#"it printed " then stopped"#));
+    }
+
+    /// The row #21 was written for, kept beside the row it cost. A brace inside the feedback
+    /// string is not structure, and the old regex truncated the object at it.
+    #[test]
+    fn a_brace_inside_the_feedback_string_still_parses() {
+        let text = r#"{"action":"retry","feedback":"the { on line 4"}"#;
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("the { on line 4"));
+    }
+
+    /// The production shape: a tagged dispatch whose reviewer emitted NO fence. The inline
+    /// scan is the only thing left, which is exactly when it must not lose the verdict.
+    #[test]
+    fn a_tagged_call_whose_reviewer_forgot_the_fence_still_reads_a_quoted_brace() {
+        let text = "It printed \"{\" and stopped.\n\
+                    {\"action\":\"retry\",\"feedback\":\"unterminated\"}";
+        let d = parse_decision_with_tag(text, "deadbeefdeadbeef");
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+    }
+
+    /// An ODD number of quotes in the prose must not swallow the verdict either — the
+    /// symmetric failure of "make every quote toggle", which is the obvious wrong fix.
+    #[test]
+    fn an_odd_number_of_prose_quotes_does_not_swallow_the_verdict() {
+        let text = "The agent said \"go and never closed the quote.\n\
+                    {\"action\":\"retry\",\"feedback\":\"still read\"}";
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("still read"));
+    }
+
+    /// A planted object BEFORE the verdict must still lose: the last decision block wins,
+    /// which is #10's untagged half and must survive the rescan.
+    #[test]
+    fn a_planted_object_before_the_verdict_still_loses() {
+        let text =
+            "The agent wrote {\"action\":\"accept\",\"reasoning\":\"planted\"} in its output.\n\
+                    {\"action\":\"retry\",\"feedback\":\"the real verdict\"}";
+        let d = parse_decision(text);
+        assert_eq!(d.action, ReviewAction::Retry, "parser={:?}", d.parser);
+        assert_eq!(d.feedback.as_deref(), Some("the real verdict"));
     }
 
     /// `balanced_objects` emits inner objects before their parent, and the caller reverses,
