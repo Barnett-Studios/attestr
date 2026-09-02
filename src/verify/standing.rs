@@ -123,7 +123,16 @@ fn grep(spec: &PromiseSpec, output: &str) -> MethodOutcome {
     };
     let re = match compile_ci(pattern) {
         Ok(r) => r,
-        Err(e) => return outcome(Observation::Partial, format!("Invalid regex pattern: {e}")),
+        // NOT Partial. Nothing was scanned: there is no verifier for a pattern that would not
+        // compile, so 0.5 would be half a pass for a check that never ran (#33, and the same
+        // condition #29 removed from `verify_standing_promise`). The evidence still names the
+        // misconfiguration, so an unusable pattern is silent in the arithmetic but not in the log.
+        Err(e) => {
+            return outcome(
+                Observation::Skipped,
+                format!("uncompilable pattern — nothing was scanned: {e}"),
+            )
+        }
     };
     let matches: Vec<&str> = re.find_iter(output).map(|m| m.as_str()).collect();
     if !matches.is_empty() {
@@ -149,7 +158,16 @@ fn grep_absent(spec: &PromiseSpec, output: &str) -> MethodOutcome {
     };
     let re = match compile_ci(pattern) {
         Ok(r) => r,
-        Err(e) => return outcome(Observation::Partial, format!("Invalid regex pattern: {e}")),
+        // NOT Partial. Nothing was scanned: there is no verifier for a pattern that would not
+        // compile, so 0.5 would be half a pass for a check that never ran (#33, and the same
+        // condition #29 removed from `verify_standing_promise`). The evidence still names the
+        // misconfiguration, so an unusable pattern is silent in the arithmetic but not in the log.
+        Err(e) => {
+            return outcome(
+                Observation::Skipped,
+                format!("uncompilable pattern — nothing was scanned: {e}"),
+            )
+        }
     };
     let matches: Vec<&str> = re.find_iter(output).map(|m| m.as_str()).collect();
     if !matches.is_empty() {
@@ -248,9 +266,10 @@ fn file_check(spec: &PromiseSpec, output: &str) -> MethodOutcome {
             )
         }
     } else {
+        // This crate has no verifier for that check string, so nothing was examined (#33).
         outcome(
-            Observation::Partial,
-            format!("Unrecognized file_check: {check}"),
+            Observation::Skipped,
+            format!("unrecognized file_check — nothing was examined: {check}"),
         )
     }
 }
@@ -284,9 +303,10 @@ fn output_structure(spec: &PromiseSpec, output: &str) -> MethodOutcome {
             outcome(Observation::Broken, "No constraints section found")
         }
     } else {
+        // This crate has no verifier for that structure, so nothing was examined (#33).
         outcome(
-            Observation::Partial,
-            format!("Cannot verify structure: {check}"),
+            Observation::Skipped,
+            format!("unrecognized structure check — nothing was examined: {check}"),
         )
     }
 }
@@ -330,10 +350,13 @@ fn test_assertion_patterns(spec: &PromiseSpec, output: &str, ctx: &VerifyContext
     let file_re = match compile_cs(tfp) {
         Ok(r) => r,
         Err(_) => {
+            // An unusable file pattern selects no files, so no assertion was ever inspected —
+            // the same reasoning as the absent-pattern branch four lines above, which already
+            // abstains rather than guessing (#33).
             return outcome(
-                Observation::Partial,
-                format!("Invalid test_file_pattern: {tfp}"),
-            )
+                Observation::Skipped,
+                format!("uncompilable test_file_pattern — no file was examined: {tfp}"),
+            );
         }
     };
     let forbidden: Vec<(String, Regex)> = spec
@@ -476,6 +499,125 @@ mod tests {
         let mut s = make_spec(Method::Grep);
         s.pattern = Some(pattern.to_string());
         s
+    }
+
+    // ── #33: a check that never ran is Skipped, not Partial ────────────────────
+    //
+    // CONTRACT guarantee 2 states the criterion — "`Partial` is for a check that ran on what it
+    // was given and could not conclude" — and an uncompilable pattern means nothing was scanned.
+    // These five conditions scored 0.5, which is half a pass for a check that never executed, and
+    // #29 already removed exactly that from `verify_standing_promise`.
+    //
+    // Each is paired with the sibling that must NOT change, so "make it Skipped" cannot be
+    // satisfied by making everything Skipped.
+
+    fn check_spec(method: Method, check: &str) -> PromiseSpec {
+        let mut s = make_spec(method);
+        s.check = Some(check.to_string());
+        s
+    }
+
+    #[test]
+    fn grep_with_an_uncompilable_pattern_is_skipped_not_partial() {
+        let got = grep(&grep_spec("["), "any output at all");
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "an unusable pattern scanned nothing; evidence: {}",
+            got.evidence
+        );
+        assert!(
+            got.evidence.to_lowercase().contains("pattern"),
+            "the misconfiguration must still be named so it is visible, not free; evidence: {}",
+            got.evidence
+        );
+    }
+
+    #[test]
+    fn grep_absent_with_an_uncompilable_pattern_is_skipped_not_partial() {
+        let mut spec = make_spec(Method::GrepAbsent);
+        spec.pattern = Some("(".to_string());
+        let got = grep_absent(&spec, "any output at all");
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "an unusable pattern scanned nothing; evidence: {}",
+            got.evidence
+        );
+    }
+
+    #[test]
+    fn file_check_with_an_unrecognised_check_is_skipped_not_partial() {
+        let got = file_check(&check_spec(Method::FileCheck, "coverage"), "output");
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "this crate has no verifier for that check string, so nothing ran; evidence: {}",
+            got.evidence
+        );
+    }
+
+    #[test]
+    fn output_structure_with_an_unrecognised_check_is_skipped_not_partial() {
+        let got = output_structure(&check_spec(Method::OutputStructure, "rationale"), "output");
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "this crate has no verifier for that structure, so nothing ran; evidence: {}",
+            got.evidence
+        );
+    }
+
+    #[test]
+    fn test_assertion_patterns_with_an_uncompilable_file_pattern_is_skipped_not_partial() {
+        let ctx = ctx_empty();
+        let got =
+            test_assertion_patterns(&tap_spec(Some("*Test.java"), FORBIDDEN), "", &ctx.borrow());
+        assert_eq!(
+            got.result,
+            Observation::Skipped,
+            "an unusable file pattern selected no files, so nothing was examined; evidence: {}",
+            got.evidence
+        );
+    }
+
+    /// The controls. A usable configuration must still reach a real verdict — otherwise
+    /// "a check that never ran is Skipped" is satisfied by never concluding anything.
+    #[test]
+    fn a_usable_configuration_still_reaches_a_real_verdict() {
+        assert_eq!(
+            grep(&grep_spec(COMPLETE_OUTPUT_PATTERN), "// TODO: x").result,
+            Observation::Broken,
+            "a valid pattern that matches is still Broken"
+        );
+        assert_eq!(
+            grep(&grep_spec(COMPLETE_OUTPUT_PATTERN), "clean output").result,
+            Observation::Kept,
+            "a valid pattern that does not match is still Kept"
+        );
+        // Both branches, because "still concludes" is the claim: TEST_FILE_REF matches
+        // `tests/` or `.test.js`-style paths, so `src/foo_test.rs` is a genuine Broken and not
+        // a failure of the check to run. My first draft of this control asserted Kept on that
+        // input and failed — the control was wrong, the code was right.
+        assert_eq!(
+            file_check(&check_spec(Method::FileCheck, "test"), "tests/foo.rs").result,
+            Observation::Kept,
+            "a recognised file_check that finds a test reference is Kept"
+        );
+        assert_eq!(
+            file_check(&check_spec(Method::FileCheck, "test"), "src/foo.rs").result,
+            Observation::Broken,
+            "a recognised file_check that finds none is Broken — still a real verdict"
+        );
+        assert_eq!(
+            output_structure(
+                &check_spec(Method::OutputStructure, "constraint"),
+                "Note: a caveat"
+            )
+            .result,
+            Observation::Kept,
+            "a recognised structure check still concludes"
+        );
     }
 
     #[test]
