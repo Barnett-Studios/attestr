@@ -34,9 +34,20 @@ Anything conforming to this contract can drop into the Verifier slot.
    excluded from the average and moves trust by nothing. `Partial` is an observation worth
    0.5, so it pulls a well-behaved agent down and a badly-behaved one up. An operand the spec
    never supplied, a **method** that did not resolve, and a backend that is not there, are all
-   `Skipped`. `Partial` is for a check that ran on what it was given and could not conclude —
-   an uncompilable regex, a `file_check`/`output_structure` whose `check` string this crate
-   does not recognise.
+   `Skipped`. `Partial` is for a check that ran on what it was given and could not conclude.
+
+   The examples this paragraph used to give for `Partial` were exceptions to its own criterion,
+   and are now `Skipped` (#33): an **uncompilable regex** scans nothing, an unusable
+   `test_file_pattern` selects no file, and a `file_check`/`output_structure` whose `check`
+   string this crate does not recognise examines nothing. In every one of them no check ran,
+   which is the same condition #29 removed from `verify_standing_promise`. The misconfiguration
+   is still named in the outcome's evidence, so it stays visible in the log while scoring
+   nothing in the arithmetic — a typo in a registry must not be able to raise an agent's trust.
+
+   `Partial` therefore has no producer in this crate today. It remains in the type because it
+   is part of the published `Observation` surface and a consumer's own verifier may produce it;
+   removing it would be a breaking change, and adding a producer back requires meeting the
+   criterion above rather than reinstating one of these.
 
    Measured on the turn a fresh install produces — promises declared, operands unset, cxpak
    not running, and one genuine `Broken` for the missing context call. Composite observation,
