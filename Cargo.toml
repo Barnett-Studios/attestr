@@ -37,8 +37,17 @@ async-trait = "0.1"
 # version of those types attestr's own consumers receive. Holding "0.1" here while
 # cascadr shipped 0.2.0 handed downstreams the struct that always passes
 # `--dangerously-skip-permissions` (attestr#13). Bump it with cascadr, not later.
-cascadr = "0.2"
-baseplate = "0.2"
+#
+# It happened again, and the second time it blocked the whole family. cascadr 0.3.0
+# (2026-09-03) and baseplate 0.3.0 (2026-09-05) shipped while this file said "0.2",
+# and because cascadr's minor is the breaking position under cargo's 0.x rule, no
+# lockfile update could reach them. dotclaude-core could not move either: it
+# constructs `cascadr::Provider` directly AND consumes it through attestr's
+# re-export, so bumping only its own pin would have linked two cascadr versions
+# whose `dyn Provider` are different types. Hence dotclaude#244's red `Twin
+# lockstep` on main, unfixable in dotclaude — this pin was the actual blocker.
+cascadr = "0.3"
+baseplate = "0.3"
 once_cell = "1"
 regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
