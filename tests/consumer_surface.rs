@@ -115,3 +115,49 @@ fn the_field_types_of_a_re_exported_struct_are_reachable() {
     let _: fn(&model::ReviewDecision) -> &model::ReviewAction = |d| &d.action;
     let _: fn(&model::MethodOutcome) -> &model::Observation = |m| &m.result;
 }
+
+/// The structural pillar's only public function, named and called by its *exact* shape
+/// (attestr#35, attestr#42). `CxpakClient` is a trait, not a value type `model` re-exports, so
+/// this is the row `model`'s re-export does not cover. `RecordedCxpakClient` with an empty
+/// recording map answers every tool with `None`, driving `verify_all` down its real
+/// short-circuit path (every verifier reads as `Skipped`), proving the call compiles and runs —
+/// not just that the names resolve.
+#[tokio::test]
+async fn a_consumer_can_name_and_call_the_structural_pillar() {
+    use attestr::cxpak::{CxpakClient, RecordedCxpakClient};
+    use attestr::verify::structural;
+    use std::collections::HashMap;
+
+    let client = RecordedCxpakClient::new(HashMap::new());
+    let dyn_client: &dyn CxpakClient = &client;
+    let results: Vec<model::VerificationResult> =
+        structural::verify_all(dyn_client, &[], None).await;
+    assert!(
+        !results.is_empty(),
+        "verify_all with no files still runs the no-files-changed verifiers"
+    );
+    for r in &results {
+        assert!(
+            matches!(r.result, model::Observation::Skipped),
+            "an empty recording must short-circuit every verifier to Skipped, got {:?} for {}",
+            r.result,
+            r.promise_id
+        );
+    }
+}
+
+/// The standing pillar's only public function, bound by its exact arity and return type
+/// (attestr#42). Binding it as an `fn` pointer with the documented shape means a future
+/// signature change that disagrees with §Surface's row fails to compile here, rather than
+/// drifting unnoticed the way the row itself did.
+#[test]
+fn a_consumer_can_name_the_standing_pillars_signature() {
+    use attestr::verify::standing;
+
+    let _: fn(
+        model::Method,
+        &model::PromiseSpec,
+        &str,
+        &standing::VerifyContext,
+    ) -> model::MethodOutcome = standing::verify;
+}

@@ -106,8 +106,8 @@ Anything conforming to this contract can drop into the Verifier slot.
 
 | Item | Shape |
 |---|---|
-| `verify::structural::verify_all(files, ctx) -> Result<Vec<Finding>>` | async; cxpak-backed structural findings for a turn's changed files. |
-| `verify::standing::verify(promise, diff) -> Vec<Finding>` | registry-driven grep/pattern assessment of a standing promise. |
+| `verify::structural::verify_all(client: &dyn cxpak::CxpakClient, changed_files: &[String], diff: Option<&str>) -> Vec<VerificationResult>` | async; cxpak-backed structural findings for a turn's changed files. No error path — a tool `verify_all` cannot reach reads as `Observation::Skipped`, never a failure. |
+| `verify::standing::verify(method: Method, spec: &PromiseSpec, output: &str, ctx: &standing::VerifyContext) -> MethodOutcome` | registry-driven grep/pattern assessment of a standing promise against one method; one outcome per call, not a batch. |
 | `trust::TrustStore::open(path)` / `.get(agent)` / `.set(agent, t, now)` / `.update_atomic(..)` | the durable per-agent trust store; `update_atomic` folds an observation under a transaction. Every method returns `Result<_, trust::TrustError>`. |
 | `trust::TrustError`, `trust::SCHEMA_VERSION` | the store's own error type and on-disk schema version. |
 | `trust::compute_run_observation`, `apply_ema`, `trust_tier`, `Tier` | the EMA machinery: run results → observation → updated trust → tier. |
@@ -117,7 +117,8 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `reviewer::new_decision_tag`, `build_prompt_with_tag`, `parse_decision_with_tag` | the per-dispatch decision tag: one mechanism in two halves, additive to the untagged pair above. A consumer driving its own prompt/parse loop should use these; asking for a tag it does not parse (or parsing one it never asked for) is inert. Ignoring the tag entirely leaves you on the last-block fallback — the echo-*before*-verdict attack is still closed, the mirror image after it is not. `Reviewer::review` uses the tagged pair. |
 
 | `model` (`attestr::model`) | the whole of `baseplate::model`, re-exported — the value types every signature above is written in. |
-| `reviewer::{ReviewAction, ReviewDecision, ReviewParser}` · `verify::{Confidence, Method, MethodOutcome, Observation, PromiseSpec, VerificationResult}` | the same types, aliased next to the functions that use them. Convenience; `attestr::model` is what makes the surface complete. |
+| `cxpak` (`attestr::cxpak`) | the whole of `baseplate::cxpak`, re-exported — `CxpakClient`, the trait `verify_all`'s first parameter is written in, and the typed request DTOs the structural verifiers build (attestr#35). The one row `model` does not cover, because it is a trait rather than a value type. |
+| `reviewer::{ReviewAction, ReviewDecision, ReviewParser}` · `verify::{Confidence, Method, MethodOutcome, Observation, PromiseSpec, VerificationResult}` | the same types, aliased next to the functions that use them. Convenience; `attestr::model` and `attestr::cxpak` are what make the surface complete. |
 
 ### The trust store owns its error type and its schema
 
