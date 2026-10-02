@@ -38,18 +38,28 @@ own errors load-bearing.
 
 ```toml
 [dependencies]
-attestr = "0.2"
+attestr = "0.5"
 ```
 
 ```rust
-use attestr::{trust, verify};
+use attestr::{cxpak::RecordedCxpakClient, trust, verify};
+use std::collections::HashMap;
+use std::path::Path;
 
-// Structural (cxpak-backed) assessment of a turn's changed files → findings.
-let findings = verify::structural::verify_all(&changed_files, &ctx).await?;
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let changed_files = vec!["src/foo.rs".to_string()];
+
+// Structural (cxpak-backed) assessment of a turn's changed files → findings. Needs a live
+// `CxpakClient`; `RecordedCxpakClient` stands in here for a connected one.
+let client = RecordedCxpakClient::new(HashMap::new());
+let findings = verify::structural::verify_all(&client, &changed_files, None).await;
 
 // Fold the run's results into the per-agent trust EMA, then read a tier.
-let store = trust::TrustStore::open(&db_path)?;
-let tier = trust::trust_tier(store.get(agent_id)?.unwrap_or(0.5));
+let store = trust::TrustStore::open(Path::new("trust.db"))?;
+let tier = trust::trust_tier(store.get("agent-1")?.unwrap_or(0.5));
+# let _ = (findings, tier);
+# Ok(())
+# }
 ```
 
 ## `attestr verify` — the behavioral pillar as a one-shot container

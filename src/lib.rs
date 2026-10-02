@@ -1,3 +1,7 @@
+//! The README's `## Use` block is included here so `cargo test --doc` compiles it
+//! (attestr#38 — the block drifted from the API for two releases because nothing did).
+#![doc = include_str!("../README.md")]
+
 pub mod reviewer;
 pub mod trust;
 pub mod verify;
@@ -28,3 +32,13 @@ pub mod verify;
 /// type reachable from here is a breaking change to attestr and takes attestr's own minor
 /// slot under 0.x. `cargo tree -d` showing a duplicated baseplate is the symptom.
 pub use baseplate::model;
+
+/// The structural pillar's own dependency: [`CxpakClient`](baseplate::cxpak::CxpakClient) and
+/// the capability traits it implements, re-exported for the same reason [`model`] is (attestr#35).
+///
+/// `verify::structural::verify_all`'s first parameter is `&dyn CxpakClient`, a trait that lives
+/// in `baseplate::cxpak`. Before this re-export, `model` covered every *value* type a consumer
+/// needs but not this one — the only trait on the structural pillar's surface — so §Surface's
+/// `verify_all` row named a parameter type no consumer could spell without a second, undeclared
+/// `baseplate` dependency (the thing `model`'s own re-export exists to make unnecessary).
+pub use baseplate::cxpak;
