@@ -136,6 +136,14 @@ async fn a_consumer_can_name_and_call_the_structural_pillar() {
         !results.is_empty(),
         "verify_all with no files still runs the no-files-changed verifiers"
     );
+    for r in &results {
+        assert!(
+            matches!(r.result, model::Observation::Skipped),
+            "an empty recording must short-circuit every verifier to Skipped, got {:?} for {}",
+            r.result,
+            r.promise_id
+        );
+    }
 }
 
 /// The standing pillar's only public function, bound by its exact arity and return type
