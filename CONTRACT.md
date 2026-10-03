@@ -119,6 +119,25 @@ Anything conforming to this contract can drop into the Verifier slot.
    "independence was not shown" and must never gate on `== SameHarness` alone; a gate written
    the other way ("proceed unless shown same-harness") treats "nobody checked" as a pass.
 
+   **The comparison is against a fixed vocabulary, `reviewer::KNOWN_LABELS` —
+   `["anthropic-cli", "openai-compat"]`, cascadr's own leaf labels — not bare string
+   inequality.** `author_harness` is free text a caller supplies (`"claude-code"`, a model id,
+   anything), and comparing it to `served_by` by equality alone made every caller outside
+   cascadr's own vocabulary read as `Independent` even when the same harness served both
+   halves — a false claim of independence, the unsafe direction. The rule: normalize both
+   sides (trim + ASCII-lowercase, so `"Anthropic-CLI "` and `"anthropic-cli"` match); equal →
+   `SameHarness`; different *and* `author_harness` is a member of `KNOWN_LABELS` →
+   `Independent`; anything else — unrecognised vocabulary, a typo, a third-party `Provider`'s
+   own label — → `Unknown`. A blank or whitespace-only `author_harness` is treated as absent
+   (`Unknown`), both when parsed from a golden fixture's `authorHarness` and when compared.
+
+   **The match is transport-level, not model-level.** Two different `OpenAiCompat` endpoints,
+   or two `ClaudeCliDispatch` rungs on different models, both report the same label
+   (`"openai-compat"` / `"anthropic-cli"` respectively) and so read `SameHarness` to each
+   other even though they may not be the same model — the safe direction for a false positive
+   to err in, and the limit cascadr#5 exists to lift (model-level identity is not yet on the
+   `Provider` trait).
+
 ## Surface
 
 | Item | Shape |

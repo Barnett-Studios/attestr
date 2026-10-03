@@ -46,7 +46,16 @@ impl ReviewRequest {
             .unwrap_or_default();
         // Absent in every golden fixture written before attestr#1 — that must keep meaning
         // "unknown", not "" or a parse error, so a pre-existing fixture stays valid input.
-        let author_harness = v["authorHarness"].as_str().map(|s| s.to_string());
+        // A present-but-blank value means the same thing: "" or "   " is not a harness label
+        // any caller meant to supply, so it is normalized to None here rather than compared
+        // against a label later and silently losing (`compute_independence` treats it the
+        // same way regardless, but the field itself should not claim to hold a value it
+        // does not).
+        let author_harness = v["authorHarness"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Self {
             task,
             agent_output,
@@ -411,6 +420,49 @@ pub fn parse_decision_with_tag(text: &str, tag: &str) -> DecisionCore {
 // `reviewer::{Provider, ClaudeCliDispatch, ...}` import paths keep working.
 pub use cascadr::{ClaudeCliDispatch, OpenAiCompat, Provider, ProviderError, Router};
 
+/// The harness labels cascadr's own leaf providers report via `Provider::label()` —
+/// `ClaudeCliDispatch` → `"anthropic-cli"`, `OpenAiCompat` → `"openai-compat"`. This is the
+/// vocabulary `ReviewRequest::author_harness` is checked against (attestr#1): a caller whose
+/// `author_harness` is a real member of this list, and differs from the reviewer's serving
+/// label, is read as `Independent`; a caller whose `author_harness` is outside this list is
+/// read as `Unknown` even when it differs from the serving label, because an unrecognised
+/// string differing from `served_by` is at least as likely to be a vocabulary mismatch
+/// (`"claude-code"` vs `"anthropic-cli"` naming the SAME harness two ways) as a genuine
+/// different harness — and misreading the former as `Independent` is the unsafe direction.
+/// A third-party `Provider` with its own label is simply outside this list; nothing stops it
+/// from being used, but its calls read `Unknown` rather than guessed either way.
+pub const KNOWN_LABELS: &[&str] = &["anthropic-cli", "openai-compat"];
+
+/// Trim + ASCII-lowercase before any harness-label comparison, so `"Anthropic-CLI "` and
+/// `"anthropic-cli"` compare equal. Case and incidental whitespace are not a harness
+/// difference — the risk this guards is the opposite of `KNOWN_LABELS`'s: a real match
+/// hidden by formatting, misread as `Independent` instead of `SameHarness`.
+fn normalize_harness(s: &str) -> String {
+    s.trim().to_ascii_lowercase()
+}
+
+/// `None`/blank → `Unknown` (nothing to compare); equal (post-normalization) → `SameHarness`;
+/// different AND `author_harness` is a recognised label → `Independent`; anything else
+/// (unrecognised vocabulary, a typo, a custom provider's own label) → `Unknown`. See
+/// `KNOWN_LABELS`'s doc comment for why membership, not bare inequality, gates `Independent`.
+fn compute_independence(
+    author_harness: Option<&str>,
+    served_by: &str,
+) -> baseplate::model::Independence {
+    let served_norm = normalize_harness(served_by);
+    let author_norm = match author_harness.map(normalize_harness) {
+        Some(a) if !a.is_empty() => a,
+        _ => return baseplate::model::Independence::Unknown,
+    };
+    if author_norm == served_norm {
+        baseplate::model::Independence::SameHarness
+    } else if KNOWN_LABELS.contains(&author_norm.as_str()) {
+        baseplate::model::Independence::Independent
+    } else {
+        baseplate::model::Independence::Unknown
+    }
+}
+
 // ---- Decision type re-exports ----
 //
 // `parse_decision` is public and returns a `DecisionCore` whose `action` and `parser` are
@@ -533,13 +585,7 @@ impl<'a> Reviewer<'a> {
                 // Observed and reported only (ADR-0002: telemetry, not control) — this never
                 // feeds back into `core.action`/`core.parser`, only into a field a consumer
                 // reads afterward.
-                let independence = match req.author_harness.as_deref() {
-                    None => baseplate::model::Independence::Unknown,
-                    Some(author) if author == served_by => {
-                        baseplate::model::Independence::SameHarness
-                    }
-                    Some(_) => baseplate::model::Independence::Independent,
-                };
+                let independence = compute_independence(req.author_harness.as_deref(), served_by);
                 baseplate::model::ReviewDecision {
                     action: core.action,
                     feedback: core.feedback,
@@ -1096,6 +1142,89 @@ mod tests {
              can only come from the wrapped leaf's label, which is what the production \
              dispatch path actually looks like (a Router, not a bare leaf)"
         );
+    }
+
+    /// Test double whose `label()` is configurable, unlike `StubDispatch`'s fixed `"stub"` —
+    /// needed to exercise `author_harness` against one of cascadr's real leaf labels
+    /// (`"anthropic-cli"`, `"openai-compat"`) rather than attestr's own test-only vocabulary.
+    struct LabeledStub(&'static str);
+
+    #[async_trait::async_trait]
+    impl Provider for LabeledStub {
+        async fn dispatch(&self, _prompt: &str) -> Result<String, ProviderError> {
+            Ok("```json\n{\"action\":\"accept\"}\n```".to_string())
+        }
+
+        fn label(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    /// The MAJOR defect this fix closes: a caller's natural `author_harness` is a free-text
+    /// field (`"claude-code"`, a model id, …), not necessarily one of cascadr's transport
+    /// labels. Comparing it against `served_by` by bare inequality made every such caller
+    /// read as `Independent` even when the SAME harness served both halves — the dangerous
+    /// direction, a false claim of independence. `"claude-code"` is not in `KNOWN_LABELS`, so
+    /// it must read `Unknown`, never `Independent`.
+    #[tokio::test]
+    async fn an_author_harness_outside_the_known_vocabulary_is_unknown_not_independent() {
+        let leaf = LabeledStub("anthropic-cli");
+        let reviewer = Reviewer::with_skills(
+            &leaf,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: Some("claude-code".to_string()),
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(
+            d.independence,
+            baseplate::model::Independence::Unknown,
+            "an author_harness outside KNOWN_LABELS must never be read as evidence of \
+             independence — the one direction that would be unsafe to get wrong"
+        );
+    }
+
+    /// Case and incidental whitespace are not a harness difference. A caller normalizing its
+    /// own label inconsistently (`"Anthropic-CLI "` vs `"anthropic-cli"`) must still land on
+    /// `SameHarness`, not `Independent` — the same false-Independent risk as the test above,
+    /// from the opposite direction (a real match hidden by formatting rather than a free-text
+    /// mismatch).
+    #[tokio::test]
+    async fn a_differently_cased_and_padded_match_is_still_same_harness() {
+        let leaf = LabeledStub("anthropic-cli");
+        let reviewer = Reviewer::with_skills(
+            &leaf,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: Some("Anthropic-CLI ".to_string()),
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(d.independence, baseplate::model::Independence::SameHarness);
+    }
+
+    /// A whitespace-only `authorHarness` in a golden fixture must parse to `None` — "the
+    /// field is present but blank" and "the field was never supplied" must mean the same
+    /// thing, or a blank string would silently read as a real (and wrong) harness label.
+    #[test]
+    fn a_blank_author_harness_parses_to_none() {
+        let v = json!({
+            "task": "t",
+            "agentOutput": "o",
+            "findings": [],
+            "authorHarness": "   "
+        });
+        let req = ReviewRequest::from_golden(&v);
+        assert_eq!(req.author_harness, None);
     }
 }
 
