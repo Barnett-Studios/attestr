@@ -76,10 +76,15 @@ $ echo '{"trace":[],"changed_files":["src/foo.rs"]}' \
 ```
 
 The request is `{trace, changed_files, blast_radius?, docs_currency?}` (every field optional; the
-verifiers fail open on absent inputs). The envelope is `{schema_version, status, body}` — a
-consumer treats any `status != "ok"` as an infrastructure failure and falls back to its
-in-process path rather than trusting the result. Bad input is a hard error (`status: "error"`,
-non-zero exit), never a silent clean pass.
+verifiers fail open on absent inputs). `trace` specifically distinguishes **absent** from
+**present and empty**: omitting the key (or `"trace": null`) reports `Skipped` on every
+trace-reading verifier — an operand the request never carried is not evidence of a violation —
+while `"trace": []` is a caller's real statement that a trace was captured and nothing was in
+it, and is scored exactly as before (a genuine coverage gap on `read-before-write` is still
+`Broken` at `Confidence::High`, the reviewer-dispatch trigger). The envelope is
+`{schema_version, status, body}` — a consumer treats any `status != "ok"` as an infrastructure
+failure and falls back to its in-process path rather than trusting the result. Bad input is a
+hard error (`status: "error"`, non-zero exit), never a silent clean pass.
 
 **In scope for the container: the behavioral pillar only.** The *structural* pillar is
 cxpak-backed (needs a live client) and the *standing-promise* pillar needs the host's resolved

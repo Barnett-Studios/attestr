@@ -14,7 +14,7 @@
 
 use std::io::Read;
 
-use attestr::verify::behavioral::{verify_behavioral, DocsCurrency};
+use attestr::verify::behavioral::{verify_behavioral_with_trace, DocsCurrency};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -36,9 +36,9 @@ struct DocsCurrencyInput {
 struct VerifyRequest {
     /// The turn's tool-call trace (opaque JSON events; the verifiers read Read/tool events).
     /// `Option`, not a bare `Vec` — "key absent" and "a JSON `null`" both deserialize to
-    /// `None`, distinct from `Some(vec![])` ("the caller supplied an empty trace"). Only
-    /// `read-before-write` reads that distinction (attestr#32); every verifier in this
-    /// crate otherwise treats an empty trace as "nothing observed", which is correct.
+    /// `None`, distinct from `Some(vec![])` ("the caller supplied an empty trace"). Every
+    /// behavioral verifier reads this distinction (attestr#32): absent reports `Skipped`,
+    /// present-and-empty is unchanged from before this fix.
     #[serde(default)]
     trace: Option<Vec<Value>>,
     #[serde(default)]
@@ -59,7 +59,7 @@ fn run_verify(input: &str) -> Result<String, String> {
         surface_paths: d.surface_paths,
         doc_paths: d.doc_paths,
     });
-    let findings = verify_behavioral(
+    let findings = verify_behavioral_with_trace(
         req.trace.as_deref(),
         &req.changed_files,
         req.blast_radius.as_ref(),
