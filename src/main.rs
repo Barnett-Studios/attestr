@@ -35,8 +35,12 @@ struct DocsCurrencyInput {
 #[derive(Deserialize)]
 struct VerifyRequest {
     /// The turn's tool-call trace (opaque JSON events; the verifiers read Read/tool events).
+    /// `Option`, not a bare `Vec` — "key absent" and "a JSON `null`" both deserialize to
+    /// `None`, distinct from `Some(vec![])` ("the caller supplied an empty trace"). Only
+    /// `read-before-write` reads that distinction (attestr#32); every verifier in this
+    /// crate otherwise treats an empty trace as "nothing observed", which is correct.
     #[serde(default)]
-    trace: Vec<Value>,
+    trace: Option<Vec<Value>>,
     #[serde(default)]
     changed_files: Vec<String>,
     /// Optional cxpak blast-radius object, if the caller pre-fetched one.
@@ -56,7 +60,7 @@ fn run_verify(input: &str) -> Result<String, String> {
         doc_paths: d.doc_paths,
     });
     let findings = verify_behavioral(
-        &req.trace,
+        req.trace.as_deref(),
         &req.changed_files,
         req.blast_radius.as_ref(),
         docs.as_ref(),
@@ -129,6 +133,45 @@ mod tests {
                 .any(|f| f["promise_id"] == "read-before-write"),
             "expected a read-before-write finding, got: {out}"
         );
+    }
+
+    #[test]
+    fn an_omitted_trace_is_skipped_not_broken() {
+        // attestr#32. `trace` key absent entirely (not `"trace":[]`) — the request never
+        // carried the operand `read-before-write` needs, and the one `Broken` this crate
+        // can emit at `Confidence::High` must not fire on an operand nobody supplied.
+        let input = r#"{"changed_files":["src/foo.rs"]}"#;
+        let out = run_verify(input).expect("verify should succeed on valid input");
+        let v: Value = serde_json::from_str(&out).expect("output is JSON");
+        let findings = v["body"]["findings"].as_array().expect("findings array");
+        let rbw = findings
+            .iter()
+            .find(|f| f["promise_id"] == "read-before-write")
+            .unwrap_or_else(|| panic!("expected a read-before-write finding, got: {out}"));
+        assert_eq!(
+            rbw["result"], "skipped",
+            "an omitted trace must not be scored Broken: {rbw}"
+        );
+    }
+
+    #[test]
+    fn a_genuine_violation_with_a_supplied_empty_trace_is_still_broken() {
+        // The discriminator: a trace that IS supplied (even empty) and proves the
+        // violation stays Broken/High — the fix must not weaken a real finding into a
+        // Skipped just because the trace happened to be empty.
+        let input = r#"{"trace":[],"changed_files":["src/foo.rs"]}"#;
+        let out = run_verify(input).expect("verify should succeed on valid input");
+        let v: Value = serde_json::from_str(&out).expect("output is JSON");
+        let findings = v["body"]["findings"].as_array().expect("findings array");
+        let rbw = findings
+            .iter()
+            .find(|f| f["promise_id"] == "read-before-write")
+            .unwrap_or_else(|| panic!("expected a read-before-write finding, got: {out}"));
+        assert_eq!(
+            rbw["result"], "broken",
+            "a supplied-empty trace with an unread changed file is a real violation: {rbw}"
+        );
+        assert_eq!(rbw["confidence"], "high");
     }
 
     #[test]

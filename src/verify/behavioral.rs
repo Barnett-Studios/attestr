@@ -107,16 +107,23 @@ fn is_cxpak_context_tool(name: &str) -> bool {
 }
 
 /// Entry point — runs all three behavioral verifiers over the trace.
+///
+/// `trace: None` means the caller did not supply one at all (vs. `Some(&[])`, a trace
+/// that was supplied and is genuinely empty) — `read-before-write` is the only verifier
+/// here for which that distinction changes the verdict (attestr#32); the other two
+/// already treat an empty trace as "nothing observed" correctly, so they take the plain
+/// slice.
 pub fn verify_behavioral(
-    trace: &[Value],
+    trace: Option<&[Value]>,
     changed_files: &[String],
     blast_radius: Option<&Value>,
     docs_currency: Option<&DocsCurrency>,
 ) -> Vec<VerificationResult> {
+    let trace_slice = trace.unwrap_or(&[]);
     let mut out = vec![
         verify_read_before_write(trace, changed_files),
-        verify_exploration_breadth(trace, blast_radius),
-        verify_context_acquisition(trace),
+        verify_exploration_breadth(trace_slice, blast_radius),
+        verify_context_acquisition(trace_slice),
     ];
     // The docs-currency check is host policy: it runs only when the host injects
     // its surface/doc file map. No map → the check is absent (not a silent Kept).
@@ -130,7 +137,15 @@ pub fn verify_behavioral(
 /// Read event (suffix-aware). When a cxpak context tool was invoked but no
 /// authoritative file list is available the result is `kept` at medium confidence
 /// (M3 downgrade).
-fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> VerificationResult {
+///
+/// `trace: None` — the caller did not supply one — is `Skipped`, not `Broken`
+/// (attestr#32): an operand the request never carried cannot be evidence of a
+/// violation. `Some(&[])` — a trace that was supplied and is genuinely empty — stays
+/// `Broken` below if there is a coverage gap; that is a real, falsifiable finding.
+fn verify_read_before_write(
+    trace: Option<&[Value]>,
+    changed_files: &[String],
+) -> VerificationResult {
     let id = "read-before-write";
 
     // No files to cover is not full coverage. This answered `Kept, High` — the heaviest
@@ -149,7 +164,8 @@ fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> Verifi
         );
     }
 
-    let reads = extract_reads(trace);
+    let trace_slice = trace.unwrap_or(&[]);
+    let reads = extract_reads(trace_slice);
 
     let unread: Vec<&str> = changed_files
         .iter()
@@ -176,9 +192,24 @@ fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> Verifi
         );
     }
 
-    // Coverage gap. If any cxpak context tool was called but no file list was
-    // provided, accept at medium confidence (cxpak directive followed).
-    let cxpak_called = trace.iter().any(|ev| {
+    // There is a coverage gap, and the request never carried a trace at all — this is
+    // not evidence the files went unread, it is the absence of the one input that
+    // could have shown either way. Falls open to Skipped, per guarantee 2.
+    if trace.is_none() {
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            format!(
+                "trace not supplied — file-level read coverage of {} modified file(s) could not be checked",
+                changed_files.len()
+            ),
+        );
+    }
+
+    // Coverage gap, trace supplied. If any cxpak context tool was called but no file
+    // list was provided, accept at medium confidence (cxpak directive followed).
+    let cxpak_called = trace_slice.iter().any(|ev| {
         ev.get("ev").and_then(|v| v.as_str()) == Some("tool")
             && is_cxpak_context_tool(ev.get("name").and_then(|v| v.as_str()).unwrap_or(""))
     });
@@ -376,7 +407,9 @@ fn path_matches(f: &str, entry: &str) -> bool {
 /// Behavioral, observation-only telemetry: when a turn's `changed_files`
 /// touches a documented public surface, a canonical doc should have been
 /// touched too. Never blocks — `Broken` is Confidence::Low telemetry only,
-/// same tier as `read-before-write`/`exploration-breadth`/`context-acquisition`.
+/// same tier as `exploration-breadth`/`context-acquisition`. `read-before-write`
+/// is the one exception in this file: its `Broken` is `Confidence::High` — it is
+/// the reviewer-dispatch trigger, not telemetry (attestr#32).
 ///
 /// An empty `changed_files` list reports `Skipped`. It used to fail open to `Kept`,
 /// mirroring `verify_read_before_write`'s empty-list branch, on the argument that
@@ -458,7 +491,7 @@ mod tests {
             json!({ "ev": "tool", "name": "Write", "file_path": "src/new.js", "args_summary": "Write src/new.js", "tokens": 80 }),
         ];
         let changed = vec!["src/new.js".to_string()];
-        let results = verify_behavioral(&trace, &changed, None, None);
+        let results = verify_behavioral(Some(&trace), &changed, None, None);
         let rbw = results
             .iter()
             .find(|r| r.promise_id == "read-before-write")
@@ -490,7 +523,7 @@ mod tests {
         let trace = vec![
             json!({ "ev": "tool", "name": "cxpak_context", "args_summary": "op=context task=x" }),
         ];
-        let results = verify_behavioral(&trace, &[], None, None);
+        let results = verify_behavioral(Some(&trace), &[], None, None);
         let ca = results
             .iter()
             .find(|r| r.promise_id == "context-acquisition")
@@ -503,7 +536,7 @@ mod tests {
         // 0 reads, 3 related files → ratio 0.0 < 0.5 → Broken.
         let trace: Vec<Value> = vec![];
         let blast = json!({ "direct_dependents": ["a.js", "b.js", "c.js"], "transitive_dependents": [], "test_files": [] });
-        let results = verify_behavioral(&trace, &[], Some(&blast), None);
+        let results = verify_behavioral(Some(&trace), &[], Some(&blast), None);
         let eb = results
             .iter()
             .find(|r| r.promise_id == "exploration-breadth")
@@ -529,7 +562,7 @@ mod tests {
             json!({ "test_files": [{ "filename": "a.test.js" }] }),
         ];
         for br in unreadable {
-            let results = verify_behavioral(&[], &[], Some(&br), None);
+            let results = verify_behavioral(None, &[], Some(&br), None);
             let eb = results
                 .iter()
                 .find(|r| r.promise_id == "exploration-breadth")
@@ -553,7 +586,7 @@ mod tests {
             json!({ "direct_dependents": [] }),
             json!({ "direct_dependents": [], "test_files": null }),
         ] {
-            let results = verify_behavioral(&[], &[], Some(&br), None);
+            let results = verify_behavioral(None, &[], Some(&br), None);
             let eb = results
                 .iter()
                 .find(|r| r.promise_id == "exploration-breadth")
@@ -574,7 +607,7 @@ mod tests {
     #[test]
     fn an_absent_blast_radius_moves_trust_by_nothing() {
         for br in [None, Some(json!(null))] {
-            let results = verify_behavioral(&[], &[], br.as_ref(), None);
+            let results = verify_behavioral(None, &[], br.as_ref(), None);
             let eb = results
                 .iter()
                 .find(|r| r.promise_id == "exploration-breadth")
@@ -601,7 +634,7 @@ mod tests {
     #[test]
     fn no_files_changed_is_no_signal_not_a_pass() {
         let cfg = docs_cfg();
-        let results = verify_behavioral(&[], &[], None, Some(&cfg));
+        let results = verify_behavioral(None, &[], None, Some(&cfg));
 
         for id in ["docs-currency", "read-before-write"] {
             let r = results
@@ -634,11 +667,15 @@ mod tests {
 
     /// The control. Without it, both verifiers hard-wired to `Skipped` satisfy every
     /// assertion above while reporting nothing for the rest of time.
+    ///
+    /// `Some(&[])`, not `None` — this asserts the SUPPLIED-empty-trace case still
+    /// reaches a real verdict (attestr#32's discriminator); the absent-trace case is
+    /// covered separately in `main.rs`'s `an_omitted_trace_is_skipped_not_broken`.
     #[test]
     fn both_still_reach_a_verdict_when_there_are_files() {
         let cfg = docs_cfg();
         let changed = vec!["src/main.rs".to_string()];
-        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
+        let results = verify_behavioral(Some(&[]), &changed, None, Some(&cfg));
 
         for id in ["docs-currency", "read-before-write"] {
             let r = results.iter().find(|r| r.promise_id == id).unwrap();
@@ -654,7 +691,7 @@ mod tests {
     #[test]
     fn docs_currency_absent_when_no_config_injected() {
         // No host file map → the check does not run at all (not a silent Kept).
-        let results = verify_behavioral(&[], &["src/main.rs".to_string()], None, None);
+        let results = verify_behavioral(None, &["src/main.rs".to_string()], None, None);
         assert!(results.iter().all(|r| r.promise_id != "docs-currency"));
     }
 
@@ -662,7 +699,7 @@ mod tests {
     fn docs_currency_kept_when_surface_and_doc_both_touched() {
         let cfg = docs_cfg();
         let changed = vec!["src/main.rs".to_string(), "README.md".to_string()];
-        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
+        let results = verify_behavioral(None, &changed, None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
@@ -674,7 +711,7 @@ mod tests {
     fn docs_currency_broken_when_surface_touched_without_doc() {
         let cfg = docs_cfg();
         let changed = vec!["src/cli/run.rs".to_string()];
-        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
+        let results = verify_behavioral(None, &changed, None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
@@ -693,7 +730,7 @@ mod tests {
             "src/cli/run.rs".to_string(),
             "docs/adrs/README.md".to_string(),
         ];
-        let results = verify_behavioral(&[], &changed, None, Some(&cfg));
+        let results = verify_behavioral(None, &changed, None, Some(&cfg));
         let dc = results
             .iter()
             .find(|r| r.promise_id == "docs-currency")
