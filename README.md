@@ -32,13 +32,13 @@ own errors load-bearing.
 |---|---|
 | `verify` | Assess a turn's diff against declared promises. `structural` (cxpak-backed) and `standing` (registry-driven grep) checks produce findings; `behavioral` covers per-turn promise blocks. |
 | `trust` | The per-agent trust store (SQLite): each assessment nudges an exponential moving average; callers read a trust tier, they don't write it. |
-| `reviewer` | On a high-confidence broken finding, dispatch an informed reviewer via a [`cascadr`](https://crates.io/crates/cascadr) provider and return a structured `{action, feedback}` decision rather than a clean-prompt resample. Handing the next attempt a specific signal is a different mechanism from resampling the same prompt — a **design hypothesis**; its advantage over resampling is **unmeasured**. |
+| `reviewer` | On a high-confidence broken finding, dispatch an informed reviewer via a [`cascadr`](https://crates.io/crates/cascadr) provider and return a structured `{action, feedback, independence}` decision rather than a clean-prompt resample. `independence` records whether the reviewer's harness differed from the turn author's (`ReviewRequest::author_harness`, caller-supplied) — observed and reported only, never used to refuse or alter the decision. Handing the next attempt a specific signal is a different mechanism from resampling the same prompt — a **design hypothesis**; its advantage over resampling is **unmeasured**. |
 
 ## Use
 
 ```toml
 [dependencies]
-attestr = "0.5"
+attestr = "0.6"
 ```
 
 ```rust

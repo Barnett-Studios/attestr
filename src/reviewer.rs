@@ -16,6 +16,14 @@ pub struct ReviewRequest {
     pub findings: Vec<Value>, // each {id, result, confidence, evidence}
     pub scenario_context: Option<Value>,
     pub files: Vec<String>,
+    /// The turn's author's own harness label, in the same vocabulary as `cascadr::Provider::
+    /// label()` (`"anthropic-cli"`, `"openai-compat"`, …) — `None` when the caller does not
+    /// know it. Attestr never derives this itself; the glue consumer is the one that knows
+    /// which harness authored the turn (attestr#1). `review()` compares it against the
+    /// *reviewer's* serving label (via `dispatch_with_label`) to set `ReviewDecision::
+    /// independence` — observed and reported only, never used to refuse or alter a review
+    /// (ADR-0002).
+    pub author_harness: Option<String>,
 }
 
 impl ReviewRequest {
@@ -36,12 +44,16 @@ impl ReviewRequest {
                     .collect()
             })
             .unwrap_or_default();
+        // Absent in every golden fixture written before attestr#1 — that must keep meaning
+        // "unknown", not "" or a parse error, so a pre-existing fixture stays valid input.
+        let author_harness = v["authorHarness"].as_str().map(|s| s.to_string());
         Self {
             task,
             agent_output,
             findings,
             scenario_context,
             files,
+            author_harness,
         }
     }
 }
@@ -483,6 +495,7 @@ impl<'a> Reviewer<'a> {
                 reasoning: Some("no findings to review".to_string()),
                 parser: baseplate::model::ReviewParser::Ok,
                 reviewer_skill,
+                independence: baseplate::model::Independence::Unknown,
             };
         }
         // qa body forwarded only on the test-code-reviewer route; build_prompt
@@ -497,23 +510,43 @@ impl<'a> Reviewer<'a> {
         // this value existed and so cannot wear it (#10).
         let tag = new_decision_tag();
         let prompt = build_prompt_with_tag(req, &self.skills.generic, qa, &tag);
-        match self.dispatch.dispatch(&prompt).await {
+        // `dispatch_with_label`, not `dispatch`: the latter cannot tell a bare leaf from a
+        // `Router` wrapping ten of them, and attestr#1's own prior analysis is explicit that
+        // a comparison built on `Router::label()` (the constant `"router"`) would never match
+        // an author's harness on any call — a control that cannot fail. `dispatch_with_label`
+        // reports the serving hop's own label through any depth of Router nesting (cascadr#31).
+        match self.dispatch.dispatch_with_label(&prompt).await {
             Err(e) => baseplate::model::ReviewDecision {
                 action: baseplate::model::ReviewAction::Accept,
                 feedback: None,
                 reasoning: Some(format!("reviewer-dispatch-error: {e}")),
                 parser: baseplate::model::ReviewParser::DispatchError,
                 reviewer_skill,
+                // Nothing served the call — there is no label to compare, so there is
+                // nothing to observe. Not SameHarness or Independent; Unknown is what "no
+                // comparison was possible" means (baseplate#34's own fail-open posture).
+                independence: baseplate::model::Independence::Unknown,
             },
-            Ok(raw) => {
+            Ok((raw, served_by)) => {
                 let text = extract_text(&raw);
                 let core = parse_decision_with_tag(&text, &tag);
+                // Observed and reported only (ADR-0002: telemetry, not control) — this never
+                // feeds back into `core.action`/`core.parser`, only into a field a consumer
+                // reads afterward.
+                let independence = match req.author_harness.as_deref() {
+                    None => baseplate::model::Independence::Unknown,
+                    Some(author) if author == served_by => {
+                        baseplate::model::Independence::SameHarness
+                    }
+                    Some(_) => baseplate::model::Independence::Independent,
+                };
                 baseplate::model::ReviewDecision {
                     action: core.action,
                     feedback: core.feedback,
                     reasoning: core.reasoning,
                     parser: core.parser,
                     reviewer_skill,
+                    independence,
                 }
             }
         }
@@ -724,6 +757,7 @@ mod tests {
             })],
             scenario_context: None,
             files: vec!["src/lib.rs".to_string()],
+            author_harness: None,
         }
     }
 
@@ -963,6 +997,105 @@ mod tests {
         assert_eq!(d.action, ReviewAction::Accept);
         assert_eq!(d.reasoning.as_deref(), Some("looks fine"));
         assert_eq!(d.parser, ReviewParser::Ok);
+    }
+
+    // ---- attestr#1: reviewer/author harness independence, observed and reported only ----
+    //
+    // `review()` must compare the *reviewer's actual serving label* (via `dispatch.
+    // dispatch_with_label`, not `dispatch.dispatch`) against `ReviewRequest::author_harness`
+    // and set `ReviewDecision::independence` accordingly. This never refuses or alters the
+    // review itself (ADR-0002: telemetry, not control) — only the four tests below assert on
+    // `independence`; every other review-outcome assertion in this file is unaffected by it.
+
+    #[tokio::test]
+    async fn a_review_served_by_the_authors_own_harness_is_reported_same_harness() {
+        let stub = StubDispatch::ok("```json\n{\"action\":\"accept\"}\n```");
+        let reviewer = Reviewer::with_skills(
+            &stub,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: Some("stub".to_string()), // StubDispatch::label() == "stub"
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(d.independence, baseplate::model::Independence::SameHarness);
+    }
+
+    #[tokio::test]
+    async fn a_review_served_by_a_different_harness_is_reported_independent() {
+        let stub = StubDispatch::ok("```json\n{\"action\":\"accept\"}\n```");
+        let reviewer = Reviewer::with_skills(
+            &stub,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: Some("anthropic-cli".to_string()), // StubDispatch is "stub"
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(d.independence, baseplate::model::Independence::Independent);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_author_harness_is_reported_unknown_not_a_guess() {
+        let stub = StubDispatch::ok("```json\n{\"action\":\"accept\"}\n```");
+        let reviewer = Reviewer::with_skills(
+            &stub,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: None,
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(
+            d.independence,
+            baseplate::model::Independence::Unknown,
+            "no author identity to compare against must not resolve to either a match or a \
+             mismatch"
+        );
+    }
+
+    /// The production path: `self.dispatch` is a real `cascadr::Router`, not a bare leaf.
+    /// Before this is wired through `dispatch_with_label`, a comparison built on `Router::
+    /// label()` would see the constant `"router"` and never match the author's harness on any
+    /// call — this is the exact vacuous-check shape attestr#1's own prior analysis named as
+    /// the blocker. Asserting `SameHarness` here (not just `!= Unknown`) proves the real
+    /// leaf's label reached the comparison, through the Router, in the path `review()` itself
+    /// drives — not a direct call to a leaf provider.
+    #[tokio::test]
+    async fn the_production_router_path_reports_the_leafs_label_not_router() {
+        let stub = StubDispatch::ok("```json\n{\"action\":\"accept\"}\n```");
+        let router = Router::new(vec![Box::new(stub)]);
+        let reviewer = Reviewer::with_skills(
+            &router,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: Some("stub".to_string()),
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(
+            d.independence,
+            baseplate::model::Independence::SameHarness,
+            "the Router's own label is \"router\", never \"stub\" — a SameHarness result here \
+             can only come from the wrapped leaf's label, which is what the production \
+             dispatch path actually looks like (a Router, not a bare leaf)"
+        );
     }
 }
 

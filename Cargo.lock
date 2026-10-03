@@ -72,9 +72,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "baseplate"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466b66eedb0f70c478a193a214112598453c2e806542baf9f5d9589c5ca765f"
+checksum = "967ad2a0d44eff8ce1c8cdfbdcfa997d58623fe32baf30a15616c86a1cd1b39e"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -109,9 +109,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cascadr"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79466c6fe68b4d6879403261b24a8b1667667d03f7bfba7d0e8044380f709a0a"
+checksum = "f2174d7648fa96cc4bdc8a942b50dee54616d66562675759dd5a1b1bb05aeb2f"
 dependencies = [
  "async-trait",
  "libc",

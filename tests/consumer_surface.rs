@@ -114,6 +114,11 @@ fn the_field_types_of_a_re_exported_struct_are_reachable() {
     let _: fn(&model::PromiseSpec) -> &Option<model::Requires> = |s| &s.requires;
     let _: fn(&model::ReviewDecision) -> &model::ReviewAction = |d| &d.action;
     let _: fn(&model::MethodOutcome) -> &model::Observation = |m| &m.result;
+    // attestr#1: a consumer reading `ReviewDecision::independence` must be able to match
+    // on it without a second, undeclared `baseplate` dependency — the same argument `model`'s
+    // re-export already makes, extended to the newest field on this struct.
+    let _: fn(&model::ReviewDecision) -> &model::Independence = |d| &d.independence;
+    let _ = model::Independence::Unknown;
 }
 
 /// The structural pillar's only public function, named and called by its *exact* shape

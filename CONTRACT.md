@@ -101,6 +101,23 @@ Anything conforming to this contract can drop into the Verifier slot.
 5. **Trust is monotone in evidence, not caller-set.** Per-agent trust is an exponential moving
    average (`trust::apply_ema`) over run observations. Callers read a tier (`trust::trust_tier`)
    and record observations; they do not hand-set trust except through the recorded path.
+6. **Reviewer/author harness independence is observed and reported, never enforced
+   (attestr#1).** `review()` dispatches through `cascadr::Provider::dispatch_with_label`, which
+   reports the *serving hop's own label* through any depth of `Router` nesting — never a
+   `Router`'s own constant label (cascadr#31) — and compares it to `ReviewRequest::
+   author_harness`, a label the caller supplies because attestr has no way to know who authored
+   the turn. The result lands in `ReviewDecision::independence`
+   (`Independent` / `SameHarness` / `Unknown`) and nowhere else: it never changes `action`,
+   `feedback`, or `parser`, and a same-harness or unknown-harness review is accepted or retried
+   on exactly the same terms as an independent one. This follows Guarantee 1 — attestr observes
+   and tells the glue consumer what it saw; only that consumer knows both identities and the
+   cascade, and only it may decide what a non-independent review is worth.
+
+   **`Unknown` is the fail-open default, not evidence of anything.** It is what "nobody
+   compared" and "a harness was missing" both deserialize to (baseplate#34), on purpose — a
+   reader cannot and must not try to tell them apart. A consumer must treat `Unknown` as
+   "independence was not shown" and must never gate on `== SameHarness` alone; a gate written
+   the other way ("proceed unless shown same-harness") treats "nobody checked" as a pass.
 
 ## Surface
 
@@ -111,8 +128,8 @@ Anything conforming to this contract can drop into the Verifier slot.
 | `trust::TrustStore::open(path)` / `.get(agent)` / `.set(agent, t, now)` / `.update_atomic(..)` | the durable per-agent trust store; `update_atomic` folds an observation under a transaction. Every method returns `Result<_, trust::TrustError>`. |
 | `trust::TrustError`, `trust::SCHEMA_VERSION` | the store's own error type and on-disk schema version. |
 | `trust::compute_run_observation`, `apply_ema`, `trust_tier`, `Tier` | the EMA machinery: run results → observation → updated trust → tier. |
-| `reviewer::Reviewer::with_skills(dispatch, skills).review(req) -> ReviewDecision` | async; dispatches an informed reviewer via a `cascadr` `Provider` and returns a structured `{action, feedback}`. |
-| `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs, prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
+| `reviewer::Reviewer::with_skills(dispatch, skills).review(req) -> ReviewDecision` | async; dispatches an informed reviewer via a `cascadr` `Provider` (through `dispatch_with_label`, not `dispatch`) and returns a structured `{action, feedback, independence}`. `independence` is observed and reported only — it never changes `action` or `parser` (ADR-0002, attestr#1). |
+| `reviewer::ReviewRequest`, `parse_decision`, `pick_reviewer_skill`, `build_prompt` | reviewer inputs — including `ReviewRequest::author_harness: Option<String>`, the turn author's harness label in `cascadr::Provider::label()`'s vocabulary, `None` when the caller does not know it — prompt assembly, and the parser that turns reviewer output into a `DecisionCore`. |
 | `reviewer::UNTRUSTED_OPEN`, `reviewer::UNTRUSTED_CLOSE` | the markers framing untrusted reviewed content in the prompt — `pub` so a consumer can assert on the framing rather than trust it. |
 | `reviewer::new_decision_tag`, `build_prompt_with_tag`, `parse_decision_with_tag` | the per-dispatch decision tag: one mechanism in two halves, additive to the untagged pair above. A consumer driving its own prompt/parse loop should use these; asking for a tag it does not parse (or parsing one it never asked for) is inert. Ignoring the tag entirely leaves you on the last-block fallback — the echo-*before*-verdict attack is still closed, the mirror image after it is not. `Reviewer::review` uses the tagged pair. |
 
@@ -187,6 +204,26 @@ stop being the same type — no compile error, just a consumer wired to the old 
 So: a cascadr version bump that changes a re-exported type is a **breaking change to attestr**, takes
 attestr's own minor slot under 0.x, and lands in lockstep rather than whenever. `cargo tree -d` showing
 a duplicated cascadr is the mechanical symptom to watch for.
+
+**The next release out of this repo is `0.6.0`.** It carries attestr#1's reviewer-independence
+observation: `ReviewRequest::author_harness` (new field — breaking for any `ReviewRequest { .. }`
+struct literal) and `review()` now reading `ReviewDecision::independence`, which it can only do
+once both re-exported dependencies carry it:
+
+- `cascadr = "0.3.1"`, the **exact minimum, not `"0.3"`** — `Provider::dispatch_with_label`
+  (cascadr#31) is 0.3.1-only. It is additive (a default trait method), so this is a patch
+  release on cascadr's side, not a minor; the breaking surface on attestr's side is entirely
+  `ReviewRequest`'s new field, not anything cascadr changed.
+- `baseplate = "0.4"` — `ReviewDecision::independence` (baseplate#34) is a minor there (breaking
+  for `ReviewDecision { .. }` struct literals), which per the rule above makes it a minor here
+  too.
+
+Known re-pin, so it is not rediscovered one broken build at a time: `conductr` (`conductr-core`)
+re-exports this module wholesale (`pub use attestr::{reviewer, trust, verify};`,
+`crates/conductr-core/src/lib.rs:25`) and constructs both types directly —
+`crate::reviewer::ReviewRequest` at `src/engine.rs:455` and `crate::reviewer::ReviewDecision`
+(attestr's type, reached through the same re-export) at `src/engine.rs:467, :525`. All three
+literals need the new fields once it moves to `attestr = "0.6"`.
 
 ## What attestr does not do
 
