@@ -106,9 +106,32 @@ fn is_cxpak_context_tool(name: &str) -> bool {
     stripped.starts_with("cxpak_")
 }
 
-/// Entry point — runs all three behavioral verifiers over the trace.
+/// Entry point, kept non-breaking (attestr#32, review round 2): `verify_behavioral` is
+/// public API, and `trace: &[Value]` cannot represent "the caller never supplied one" vs
+/// "supplied and empty" — the distinction the fix needs. Rather than break this signature
+/// one release after it shipped, it now delegates to [`verify_behavioral_with_trace`] as
+/// `Some(trace)`, i.e. "a trace was supplied" — exactly its old meaning, since there was
+/// previously no way to express absence through this entry point at all. A caller that can
+/// distinguish the two states should call the new function directly; this one is for every
+/// existing caller that cannot and should not have to change.
 pub fn verify_behavioral(
     trace: &[Value],
+    changed_files: &[String],
+    blast_radius: Option<&Value>,
+    docs_currency: Option<&DocsCurrency>,
+) -> Vec<VerificationResult> {
+    verify_behavioral_with_trace(Some(trace), changed_files, blast_radius, docs_currency)
+}
+
+/// As [`verify_behavioral`], but `trace: None` can represent "the caller never supplied
+/// one" distinctly from `Some(&[])` ("supplied and genuinely empty") — the distinction
+/// `read-before-write`, `exploration-breadth`, and `context-acquisition` all now read:
+/// `None` reports `Skipped` (an operand the request never carried cannot be evidence of a
+/// violation, CONTRACT guarantee 2); `Some(&[])` is unchanged from before this fix — a real,
+/// falsifiable finding where one is reachable, exactly as `verify_behavioral` always
+/// evaluated it.
+pub fn verify_behavioral_with_trace(
+    trace: Option<&[Value]>,
     changed_files: &[String],
     blast_radius: Option<&Value>,
     docs_currency: Option<&DocsCurrency>,
@@ -130,7 +153,15 @@ pub fn verify_behavioral(
 /// Read event (suffix-aware). When a cxpak context tool was invoked but no
 /// authoritative file list is available the result is `kept` at medium confidence
 /// (M3 downgrade).
-fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> VerificationResult {
+///
+/// `trace: None` — the caller did not supply one — is `Skipped`, not `Broken`
+/// (attestr#32): an operand the request never carried cannot be evidence of a
+/// violation. `Some(&[])` — a trace that was supplied and is genuinely empty — stays
+/// `Broken` below if there is a coverage gap; that is a real, falsifiable finding.
+fn verify_read_before_write(
+    trace: Option<&[Value]>,
+    changed_files: &[String],
+) -> VerificationResult {
     let id = "read-before-write";
 
     // No files to cover is not full coverage. This answered `Kept, High` — the heaviest
@@ -149,7 +180,8 @@ fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> Verifi
         );
     }
 
-    let reads = extract_reads(trace);
+    let trace_slice = trace.unwrap_or(&[]);
+    let reads = extract_reads(trace_slice);
 
     let unread: Vec<&str> = changed_files
         .iter()
@@ -176,9 +208,24 @@ fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> Verifi
         );
     }
 
-    // Coverage gap. If any cxpak context tool was called but no file list was
-    // provided, accept at medium confidence (cxpak directive followed).
-    let cxpak_called = trace.iter().any(|ev| {
+    // There is a coverage gap, and the request never carried a trace at all — this is
+    // not evidence the files went unread, it is the absence of the one input that
+    // could have shown either way. Falls open to Skipped, per guarantee 2.
+    if trace.is_none() {
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            format!(
+                "trace not supplied — file-level read coverage of {} modified file(s) could not be checked",
+                changed_files.len()
+            ),
+        );
+    }
+
+    // Coverage gap, trace supplied. If any cxpak context tool was called but no file
+    // list was provided, accept at medium confidence (cxpak directive followed).
+    let cxpak_called = trace_slice.iter().any(|ev| {
         ev.get("ev").and_then(|v| v.as_str()) == Some("tool")
             && is_cxpak_context_tool(ev.get("name").and_then(|v| v.as_str()).unwrap_or(""))
     });
@@ -218,8 +265,24 @@ fn verify_read_before_write(trace: &[Value], changed_files: &[String]) -> Verifi
 /// Related files = union of `direct_dependents + transitive_dependents + test_files`
 /// at the top level of `blast_radius`. Reads the explored subset and computes
 /// ratio; >= 0.5 → kept (low confidence).
-fn verify_exploration_breadth(trace: &[Value], blast_radius: Option<&Value>) -> VerificationResult {
+///
+/// `trace: None` (attestr#32, review round 2) — not supplied at all — is `Skipped`, same
+/// tier as every other "could not run" branch here. `Some(&[])`, supplied and empty, is
+/// unchanged: `extract_reads` on an empty slice yields no reads, same as always.
+fn verify_exploration_breadth(
+    trace: Option<&[Value]>,
+    blast_radius: Option<&Value>,
+) -> VerificationResult {
     let id = "exploration-breadth";
+
+    let Some(trace) = trace else {
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "trace not supplied",
+        );
+    };
 
     // Treat JSON null the same as absent (JS: `if (!blastRadiusResponse) return partial`).
     // `Skipped`, not the `Partial` this carried until #27: an absent backend is guarantee 2's
@@ -312,8 +375,19 @@ fn verify_exploration_breadth(trace: &[Value], blast_radius: Option<&Value>) -> 
 /// `cxpak_context_for_task` (still a context op) and `cxpak_context_diff` (a
 /// review op under `cxpak_review`, a genuine but harmless false-positive):
 /// acceptable slack for a low-confidence, observation-only telemetry promise.
-fn verify_context_acquisition(trace: &[Value]) -> VerificationResult {
+fn verify_context_acquisition(trace: Option<&[Value]>) -> VerificationResult {
     let id = "context-acquisition";
+    // attestr#32, review round 2: `None` (never supplied) is `Skipped`, not the `Broken`
+    // every absent-or-empty trace read as before this fix. `Some(&[])` is unchanged: the
+    // `.any` below is false on an empty slice exactly as it always was.
+    let Some(trace) = trace else {
+        return mk(
+            id,
+            Observation::Skipped,
+            Confidence::Low,
+            "trace not supplied",
+        );
+    };
     let acquired = trace.iter().any(|ev| {
         // JS: `t.tool || t.name || t.action || ''` — tool first, then name, then action.
         let name = ev
@@ -376,7 +450,9 @@ fn path_matches(f: &str, entry: &str) -> bool {
 /// Behavioral, observation-only telemetry: when a turn's `changed_files`
 /// touches a documented public surface, a canonical doc should have been
 /// touched too. Never blocks — `Broken` is Confidence::Low telemetry only,
-/// same tier as `read-before-write`/`exploration-breadth`/`context-acquisition`.
+/// same tier as `exploration-breadth`/`context-acquisition`. `read-before-write`
+/// is the one exception in this file: its `Broken` is `Confidence::High` — it is
+/// the reviewer-dispatch trigger, not telemetry (attestr#32).
 ///
 /// An empty `changed_files` list reports `Skipped`. It used to fail open to `Kept`,
 /// mirroring `verify_read_before_write`'s empty-list branch, on the argument that
@@ -447,6 +523,59 @@ fn verify_docs_currency(changed_files: &[String], cfg: &DocsCurrency) -> Verific
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// attestr#32, review round 2: the Option-aware entry point directly, not just through
+    /// `verify_behavioral`'s `Some(trace)` delegation. An absent trace reports `Skipped` on
+    /// all three trace-reading verifiers — `read-before-write` was the one #32 originally
+    /// fixed; `exploration-breadth` and `context-acquisition` are threaded the same way in
+    /// this round, per review.
+    #[test]
+    fn verify_behavioral_with_trace_none_skips_every_trace_reading_verifier() {
+        let changed = vec!["src/new.js".to_string()];
+        let blast =
+            json!({ "direct_dependents": ["a.js"], "transitive_dependents": [], "test_files": [] });
+        let results = verify_behavioral_with_trace(None, &changed, Some(&blast), None);
+        for id in [
+            "read-before-write",
+            "exploration-breadth",
+            "context-acquisition",
+        ] {
+            let r = results.iter().find(|r| r.promise_id == id).unwrap();
+            assert_eq!(
+                r.result,
+                Observation::Skipped,
+                "{id} must be Skipped when trace is None, not scored against an operand \
+                 the request never carried: {}",
+                r.evidence
+            );
+            assert_eq!(r.confidence, Confidence::Low);
+        }
+    }
+
+    /// The control: `Some(&[])` — a trace that was supplied and is genuinely empty — must
+    /// stay exactly as `verify_behavioral` always evaluated it (unchanged by this round).
+    #[test]
+    fn verify_behavioral_with_trace_some_empty_matches_the_stable_functions_behaviour() {
+        let changed = vec!["src/new.js".to_string()];
+        let with_option = verify_behavioral_with_trace(Some(&[]), &changed, None, None);
+        let stable = verify_behavioral(&[], &changed, None, None);
+        for id in [
+            "read-before-write",
+            "exploration-breadth",
+            "context-acquisition",
+        ] {
+            let a = with_option.iter().find(|r| r.promise_id == id).unwrap();
+            let b = stable.iter().find(|r| r.promise_id == id).unwrap();
+            assert_eq!(
+                a.result, b.result,
+                "{id} diverged between the two entry points"
+            );
+            assert_eq!(
+                a.confidence, b.confidence,
+                "{id} diverged between the two entry points"
+            );
+        }
+    }
 
     #[test]
     fn read_before_write_medium_when_cxpak_context_called_but_file_uncovered() {
@@ -634,6 +763,10 @@ mod tests {
 
     /// The control. Without it, both verifiers hard-wired to `Skipped` satisfy every
     /// assertion above while reporting nothing for the rest of time.
+    ///
+    /// `Some(&[])`, not `None` — this asserts the SUPPLIED-empty-trace case still
+    /// reaches a real verdict (attestr#32's discriminator); the absent-trace case is
+    /// covered separately in `main.rs`'s `an_omitted_trace_is_skipped_not_broken`.
     #[test]
     fn both_still_reach_a_verdict_when_there_are_files() {
         let cfg = docs_cfg();
