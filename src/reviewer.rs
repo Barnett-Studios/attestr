@@ -422,15 +422,16 @@ pub use cascadr::{ClaudeCliDispatch, OpenAiCompat, Provider, ProviderError, Rout
 
 /// The harness labels cascadr's own leaf providers report via `Provider::label()` —
 /// `ClaudeCliDispatch` → `"anthropic-cli"`, `OpenAiCompat` → `"openai-compat"`. This is the
-/// vocabulary `ReviewRequest::author_harness` is checked against (attestr#1): a caller whose
-/// `author_harness` is a real member of this list, and differs from the reviewer's serving
-/// label, is read as `Independent`; a caller whose `author_harness` is outside this list is
-/// read as `Unknown` even when it differs from the serving label, because an unrecognised
-/// string differing from `served_by` is at least as likely to be a vocabulary mismatch
-/// (`"claude-code"` vs `"anthropic-cli"` naming the SAME harness two ways) as a genuine
-/// different harness — and misreading the former as `Independent` is the unsafe direction.
-/// A third-party `Provider` with its own label is simply outside this list; nothing stops it
-/// from being used, but its calls read `Unknown` rather than guessed either way.
+/// vocabulary both `ReviewRequest::author_harness` and the reviewer's serving label are
+/// checked against (attestr#1): **both** must be members of this list, and differ, before a
+/// difference is read as `Independent`. Either side alone being unrecognised is read as
+/// `Unknown`, even when the two strings differ, because an unrecognised label differing from
+/// the other side is at least as likely to be a vocabulary mismatch (`"claude-code"` vs
+/// `"anthropic-cli"` naming the SAME harness two ways, or an unrecognised *serving* label
+/// wrapping any harness underneath) as a genuine different harness — and misreading either
+/// as `Independent` is the unsafe direction. A third-party `Provider` with its own label is
+/// simply outside this list; nothing stops it from being used, but its calls read `Unknown`
+/// on either side of the comparison rather than guessed either way.
 pub const KNOWN_LABELS: &[&str] = &["anthropic-cli", "openai-compat"];
 
 /// Trim + ASCII-lowercase before any harness-label comparison, so `"Anthropic-CLI "` and
@@ -442,9 +443,10 @@ fn normalize_harness(s: &str) -> String {
 }
 
 /// `None`/blank → `Unknown` (nothing to compare); equal (post-normalization) → `SameHarness`;
-/// different AND `author_harness` is a recognised label → `Independent`; anything else
-/// (unrecognised vocabulary, a typo, a custom provider's own label) → `Unknown`. See
-/// `KNOWN_LABELS`'s doc comment for why membership, not bare inequality, gates `Independent`.
+/// different AND **both** `author_harness` and `served_by` are recognised labels →
+/// `Independent`; anything else (either side outside the known vocabulary — unrecognised
+/// vocabulary, a typo, a custom provider's own label) → `Unknown`. See `KNOWN_LABELS`'s doc
+/// comment for why membership on both sides, not bare inequality, gates `Independent`.
 fn compute_independence(
     author_harness: Option<&str>,
     served_by: &str,
@@ -456,7 +458,9 @@ fn compute_independence(
     };
     if author_norm == served_norm {
         baseplate::model::Independence::SameHarness
-    } else if KNOWN_LABELS.contains(&author_norm.as_str()) {
+    } else if KNOWN_LABELS.contains(&author_norm.as_str())
+        && KNOWN_LABELS.contains(&served_norm.as_str())
+    {
         baseplate::model::Independence::Independent
     } else {
         baseplate::model::Independence::Unknown
@@ -1072,7 +1076,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_review_served_by_a_different_harness_is_reported_independent() {
+    async fn a_review_served_by_an_unrecognised_harness_is_unknown_not_independent() {
+        // `StubDispatch`'s label, "stub", is not a `KNOWN_LABELS` member. An unrecognised
+        // serving label could be wrapping any harness underneath (a custom `Provider`, a
+        // misconfigured one, …) — asserting `Independent` from "author is known, served is
+        // not" is exactly as unsafe as asserting it from "served is known, author is not"
+        // (the defect the vocabulary check already closed on the author side). Both sides
+        // must be known before a difference counts as evidence.
         let stub = StubDispatch::ok("```json\n{\"action\":\"accept\"}\n```");
         let reviewer = Reviewer::with_skills(
             &stub,
@@ -1083,6 +1093,26 @@ mod tests {
         );
         let req = ReviewRequest {
             author_harness: Some("anthropic-cli".to_string()), // StubDispatch is "stub"
+            ..hostile("done")
+        };
+        let d = reviewer.review(&req).await;
+        assert_eq!(d.independence, baseplate::model::Independence::Unknown);
+    }
+
+    /// The positive case `Independent` is for: both sides are real, known, DIFFERENT
+    /// harnesses. This is the only shape that should produce `Independent`.
+    #[tokio::test]
+    async fn a_review_served_by_a_different_known_harness_is_reported_independent() {
+        let leaf = LabeledStub("openai-compat");
+        let reviewer = Reviewer::with_skills(
+            &leaf,
+            SkillBodies {
+                generic: SKILL.to_string(),
+                qa: None,
+            },
+        );
+        let req = ReviewRequest {
+            author_harness: Some("anthropic-cli".to_string()),
             ..hostile("done")
         };
         let d = reviewer.review(&req).await;

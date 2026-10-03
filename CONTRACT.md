@@ -122,14 +122,18 @@ Anything conforming to this contract can drop into the Verifier slot.
    **The comparison is against a fixed vocabulary, `reviewer::KNOWN_LABELS` —
    `["anthropic-cli", "openai-compat"]`, cascadr's own leaf labels — not bare string
    inequality.** `author_harness` is free text a caller supplies (`"claude-code"`, a model id,
-   anything), and comparing it to `served_by` by equality alone made every caller outside
-   cascadr's own vocabulary read as `Independent` even when the same harness served both
-   halves — a false claim of independence, the unsafe direction. The rule: normalize both
-   sides (trim + ASCII-lowercase, so `"Anthropic-CLI "` and `"anthropic-cli"` match); equal →
-   `SameHarness`; different *and* `author_harness` is a member of `KNOWN_LABELS` →
-   `Independent`; anything else — unrecognised vocabulary, a typo, a third-party `Provider`'s
-   own label — → `Unknown`. A blank or whitespace-only `author_harness` is treated as absent
-   (`Unknown`), both when parsed from a golden fixture's `authorHarness` and when compared.
+   anything), and `served_by` can be any third-party `Provider`'s own label, not only
+   cascadr's two. Comparing the two by equality alone made every caller outside cascadr's
+   vocabulary read as `Independent` even when the same harness served both halves — a false
+   claim of independence, the unsafe direction — and the mirror risk sits on the serving
+   side too: an unrecognised serving label could be wrapping any harness underneath, so
+   "author is known and differs" is not enough either. The rule: normalize both sides (trim +
+   ASCII-lowercase, so `"Anthropic-CLI "` and `"anthropic-cli"` match); equal → `SameHarness`;
+   different *and* **both** `author_harness` and `served_by` are members of `KNOWN_LABELS` →
+   `Independent`; anything else — either side outside the known vocabulary, a typo, an
+   unrecognised third-party label — → `Unknown`. A blank or whitespace-only `author_harness`
+   is treated as absent (`Unknown`), both when parsed from a golden fixture's `authorHarness`
+   and when compared.
 
    **The match is transport-level, not model-level.** Two different `OpenAiCompat` endpoints,
    or two `ClaudeCliDispatch` rungs on different models, both report the same label
