@@ -1119,6 +1119,37 @@ mod tests {
         assert_eq!(d.independence, baseplate::model::Independence::Independent);
     }
 
+    /// `KNOWN_LABELS` is a hand-written copy of cascadr's own leaf labels, not derived from
+    /// cascadr — so nothing stops the two from drifting apart. If cascadr ever renamed
+    /// `"anthropic-cli"` (or `"openai-compat"`), every real pair would silently degrade to
+    /// `Unknown` (the fail-open default), which reads as "nobody checked" rather than as the
+    /// loud failure a vocabulary drift deserves. Pinning both real constructors' `.label()`
+    /// against `KNOWN_LABELS` here means that drift fails this test instead.
+    #[test]
+    fn known_labels_matches_cascadrs_real_leaf_labels() {
+        let anthropic_cli = ClaudeCliDispatch::new(
+            "sonnet".to_string(),
+            std::time::Duration::from_secs(1),
+            std::path::PathBuf::from("/tmp"),
+        );
+        let openai_compat = OpenAiCompat::new(
+            "https://example.invalid".to_string(),
+            std::time::Duration::from_secs(1),
+        );
+        assert!(
+            KNOWN_LABELS.contains(&anthropic_cli.label()),
+            "ClaudeCliDispatch::label() is {:?}, not in KNOWN_LABELS {:?}",
+            anthropic_cli.label(),
+            KNOWN_LABELS
+        );
+        assert!(
+            KNOWN_LABELS.contains(&openai_compat.label()),
+            "OpenAiCompat::label() is {:?}, not in KNOWN_LABELS {:?}",
+            openai_compat.label(),
+            KNOWN_LABELS
+        );
+    }
+
     #[tokio::test]
     async fn an_unknown_author_harness_is_reported_unknown_not_a_guess() {
         let stub = StubDispatch::ok("```json\n{\"action\":\"accept\"}\n```");
